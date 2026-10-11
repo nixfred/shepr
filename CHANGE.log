@@ -1,0 +1,11 @@
+Shepr change log. Newest first.
+Every outside contribution is listed with the contributor's GitHub profile and, when one could be verified, their X profile.
+
+2026-10-10  v38  Jordan Partridge  https://github.com/jordanpartridge
+  X: none found (checked 2026-10-10: GitHub lists no X account, only LinkedIn, and his site links none)
+  #1  A session herdr no longer has is left, not polled. herdr answers agent_not_found, Shepr used to turn that into HTTP 400,
+      and the phone asked again every 6 seconds. It now gets a 404, closes the session back to the queue and says "That session is gone."
+  #2  `shepr pair` names the systemd unit installed on this machine. It reads ~/.config/systemd/user and names the unit that runs
+      this server.py (symlinks included); with none installed it names both install styles instead of ordering one.
+  #3  The install block in the README links `shepr` into whichever of ~/.local/bin or ~/bin your PATH already searches first,
+      and falls back to ~/.local/bin, so `shepr pair` is found on the first try.
