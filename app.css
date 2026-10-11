@@ -793,3 +793,4 @@ html[data-motion=off] *,html[data-motion=off] *::before,html[data-motion=off] *:
 .setbody .sec{margin:4px 2px 0}
 .setbody>.devbox{flex:1 1 60px;min-height:60px;max-height:none}
 .devbox.more{-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 22px),transparent);mask-image:linear-gradient(to bottom,#000 calc(100% - 22px),transparent)}
+.exgit{margin-left:8px;padding:1px 6px;border:1px solid var(--line);border-radius:6px;font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);vertical-align:middle}

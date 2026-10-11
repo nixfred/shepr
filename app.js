@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v39';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v40';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -1247,9 +1247,25 @@ function openGoTo(prefill) {
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
 const DIR_OK = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 function openNewProject() {
-  const box = el('div');
-  box.append(el('h3', null, 'Start a new project'),
-             el('div', 'sub', 'Makes a new herdr project, creates its folder in ~/Projects, and starts ccc in it. You confirm first.'));
+  const box = el('div'); box.style.cssText = 'display:flex;flex-direction:column;min-height:0';
+  let tab = store.get('shepr.newtab', 'new') === 'existing' ? 'existing' : 'new';
+  const sub = el('div', 'sub'), seg = el('div', 'seg'), body = el('div');
+  seg.id = 'np-tabs'; body.style.cssText = 'display:flex;flex-direction:column;min-height:0;flex:1 1 auto';
+  const bNew = btn('New project', 'mini-btn', () => show('new')), bOld = btn('Existing folder', 'mini-btn', () => show('existing'));
+  bNew.dataset.tab = 'new'; bOld.dataset.tab = 'existing'; seg.append(bNew, bOld);
+  box.append(el('h3', null, 'Start a project'), sub, seg, body);
+  const show = (t, first) => {
+    tab = t; store.set('shepr.newtab', t);
+    bNew.classList.toggle('on', t === 'new'); bOld.classList.toggle('on', t === 'existing');
+    body.textContent = '';
+    if (t === 'new') { sub.textContent = 'Makes a new herdr project, creates its folder in ~/Projects, and starts ccc in it. You confirm first.'; newProjectForm(body, first); }
+    else { sub.textContent = 'Opens a folder you already have as a herdr project. Nothing in it is created or changed. You confirm first.'; existingFolderPicker(body); }
+  };
+  openSheet(box);
+  show(tab, true);
+}
+
+function newProjectForm(box, focusIt) {
   const field = (label, input) => { const f = el('div', 'npf'); f.append(el('div', 'k', label), input); return f; };
   const mk = (ph, max) => { const i = el('input', 'search'); i.type = 'text'; i.placeholder = ph; i.maxLength = max; i.autocomplete = 'off'; i.autocapitalize = 'off'; i.spellcheck = false; return i; };
   const name = mk('shows on the herdr title bar', 60), dir = mk('folder-name', 80), first = mk('optional: what should Claude start on?', 500);
@@ -1275,8 +1291,53 @@ function openNewProject() {
   row.append(btn('Cancel', '', closeSheet), go);
   box.append(row);
   upd();
-  openSheet(box);
-  setTimeout(() => name.focus(), 50);
+  if (focusIt) setTimeout(() => name.focus(), 50);
+}
+
+// ---- Existing folder: a folder you already have, opened as a herdr project. The host lists the folders in ~/Projects that herdr has no
+// terminal in (newest conversation first); you pick Claude or Codex, resume or fresh, and see the exact command. Nothing is created.
+function existingFolderPicker(box) {
+  const local = () => (S.hello && S.hello.name) || '';
+  let mode = store.get('shepr.openmode', 'continue') === 'fresh' ? 'fresh' : 'continue';
+  const seg = el('div', 'seg');
+  const bR = btn('Resume last', 'mini-btn', () => setMode('continue')), bN = btn('Fresh session', 'mini-btn', () => setMode('fresh'));
+  seg.append(bR, bN);
+  const inp = el('input', 'search'); inp.id = 'ex-search'; inp.type = 'search'; inp.placeholder = 'Search folders'; inp.autocomplete = 'off'; inp.autocapitalize = 'off'; inp.spellcheck = false;
+  const count = el('div', 'dim'); count.id = 'ex-count'; count.style.cssText = 'font-size:13.5px;margin:0 2px 6px';
+  const list = el('div', 'golist'); list.id = 'ex-list';
+  list.append(el('div', 'empty', 'Looking…'));
+  box.append(seg, inp, count, list);
+  const row = el('div', 'btns'); row.style.marginTop = '8px'; row.append(btn('Close', '', closeSheet)); box.append(row);
+  let all = [], info = null;
+  const setMode = (m) => { mode = m; store.set('shepr.openmode', m); draw(); };
+  const draw = () => {
+    bR.classList.toggle('on', mode === 'continue'); bN.classList.toggle('on', mode === 'fresh');
+    list.textContent = '';
+    if (!info) return;
+    const toks = inp.value.toLowerCase().split(/\s+/).filter(Boolean);
+    const hits = all.filter((i) => toks.every((t) => i.dir.toLowerCase().indexOf(t) >= 0));
+    count.textContent = all.length + (all.length === 1 ? ' folder' : ' folders') + ' without a herdr project' + (info.open ? ', ' + info.open + ' already open' : '');
+    if (!hits.length) list.append(el('div', 'empty', all.length ? 'Nothing matches.' : 'Every folder in ' + info.base + ' is already a herdr project.'));
+    hits.slice(0, 80).forEach((it) => {
+      const r = el('div', 'hrow wake'); r.dataset.dir = it.dir;
+      const meta = el('div', 'meta'), tt = el('div', 'ttl');
+      tt.append(it.dir); if (it.git) tt.append(el('span', 'exgit', 'git'));
+      const seen = [it.claude ? 'Claude ' + agoText(it.claude) : '', it.codex ? 'Codex ' + agoText(it.codex) : ''].filter(Boolean).join(' · ');
+      meta.append(tt, el('div', 'sub', seen || 'No conversations yet'));
+      r.append(meta);
+      [['claude', 'Claude'], ['codex', 'Codex']].forEach(([agent, name]) => {
+        const b = btn(name, 'mini-btn', () => prepare({ kind: 'open_folder', host: local(), dir: it.dir, mode, agent }));
+        if (mode === 'continue' && !it[agent]) { b.disabled = true; b.title = 'no ' + name + ' conversation here to resume'; }   // resuming needs something to resume
+        r.append(b);
+      });
+      list.append(r);
+    });
+    if (hits.length > 80) { const more = el('div', 'dim', 'Showing 80 of ' + hits.length + '. Search to narrow the list.'); more.style.cssText = 'font-size:13.5px;padding:6px 2px'; list.append(more); }
+  };
+  inp.addEventListener('input', draw);
+  draw();
+  api('api/folders?host=' + encodeURIComponent(local())).then((r) => { all = r.items || []; info = r; draw(); })
+    .catch((e) => { list.textContent = ''; list.append(el('div', 'empty', 'Could not list folders: ' + e.message)); });
 }
 
 // ---- wake a PROJECT: start Claude in a terminal that has no agent in it. Pick, then confirm the exact command.
@@ -1371,15 +1432,15 @@ const HOST_KINDS = ['host_enable', 'host_disable', 'host_add', 'device_revoke'];
 function showPlan(plan) {
   const t = plan.target;
   const isHost = HOST_KINDS.indexOf(plan.kind) >= 0;
-  const isWake = plan.kind === 'wake', isStart = plan.kind === 'start', isNew = plan.kind === 'new_project';
+  const isWake = plan.kind === 'wake', isStart = plan.kind === 'start', isNew = plan.kind === 'new_project', isOpen = plan.kind === 'open_folder';
   const box = el('div');
-  box.append(el('h3', null, plan.approves ? 'This approves it. Send?' : isWake ? 'Wake these sessions?' : isStart ? 'Wake this project?' : isNew ? 'Start this new project?' : isHost ? 'Make this change?' : 'Send this?'),
+  box.append(el('h3', null, plan.approves ? 'This approves it. Send?' : isWake ? 'Wake these sessions?' : isStart ? 'Wake this project?' : isNew ? 'Start this new project?' : isOpen ? 'Open this project?' : isHost ? 'Make this change?' : 'Send this?'),
              el('div', 'sub', [t.host, t.title, t.pane].filter(Boolean).join(' · ') + (t.status ? ' · ' + (STATE_LABEL[t.status] || t.status) : '')));
   if (plan.approves) box.append(el('div', 'warnbox', 'The option you picked reads like an approval. Check it is what you mean.'));
   const kv = el('div', 'kv selectable');
   plan.lines.forEach((l) => { kv.append(el('div', 'k', l.k), el('div', 'v', l.v)); });
   box.append(kv);
-  const go = btn(isWake ? 'Wake them' : isStart ? 'Start it' : isNew ? 'Create it' : isHost ? 'Do it' : 'Send', 'go' + (plan.approves ? ' appr' : ''), () => commit(plan, go));
+  const go = btn(isWake ? 'Wake them' : isStart ? 'Start it' : isNew ? 'Create it' : isOpen ? 'Open it' : isHost ? 'Do it' : 'Send', 'go' + (plan.approves ? ' appr' : ''), () => commit(plan, go));
   // WHY: the sheet appears under the thumb that just tapped Send in the dock. A short dead time
   // stops a double-tap or a late touch from confirming something nobody has read yet.
   go.disabled = true;
@@ -1395,8 +1456,8 @@ function commit(plan, goBtn) {
   const sentTo = S.cur ? S.cur.host + '|' + S.cur.pane : null;
   post('api/send/commit', { nonce: plan.nonce }).then((r) => {
     closeSheet();
-    if (plan.kind === 'new_project') {
-      notify('Created ' + plan.target.title + '. Claude is starting there.', false);
+    if (plan.kind === 'new_project' || plan.kind === 'open_folder') {
+      notify(plan.kind === 'open_folder' ? 'Opened ' + plan.target.title + '. It is starting there.' : 'Created ' + plan.target.title + '. Claude is starting there.', false);
       fetchQueue(true); setTimeout(() => fetchQueue(true), 3000); setTimeout(() => fetchQueue(true), 8000);
       return;
     }
@@ -1434,7 +1495,7 @@ function commit(plan, goBtn) {
 
 function prepare(body) {
   if (body.kind === 'text') S.lastText = body.text;
-  const isHost = HOST_KINDS.indexOf(body.kind) >= 0 || body.kind === 'wake' || body.kind === 'start' || body.kind === 'new_project';
+  const isHost = HOST_KINDS.indexOf(body.kind) >= 0 || body.kind === 'wake' || body.kind === 'start' || body.kind === 'new_project' || body.kind === 'open_folder';
   if (!isHost && !S.cur) return;
   const b = isHost ? body : Object.assign({ host: S.cur.host, pane: S.cur.pane }, body);
   post('api/send/prepare', b).then((p) => { p.kind = p.kind || body.kind; showPlan(p); })

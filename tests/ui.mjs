@@ -608,6 +608,68 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     fs.rmSync('/tmp/shepr-projects', { recursive: true, force: true });
   }
 
+  // ---- Start new > Existing folder: a folder you already have, opened as a herdr project, creating nothing
+  {
+    const R = '/tmp/shepr-projects';
+    fs.mkdirSync(R + '/resume-me', { recursive: true }); fs.writeFileSync(R + '/resume-me/notes.txt', 'keep me');
+    fs.mkdirSync(R + '/fresh-one/.git', { recursive: true }); fs.mkdirSync(R + '/busy-folder', { recursive: true });
+    fs.mkdirSync(R + '/.hidden', { recursive: true }); fs.mkdirSync(R + '/_archive', { recursive: true }); fs.writeFileSync(R + '/a-file.txt', 'x');
+    const hr = (...a) => execFileSync('herdr', a, { env: ENV, encoding: 'utf8', input: '' });
+    const wsOf = (label) => JSON.parse(hr('workspace', 'list')).result.workspaces.find((w) => w.label === label);
+    const busyWs = JSON.parse(hr('workspace', 'create', '--label', 'busy-folder', '--cwd', R + '/busy-folder', '--no-focus')).result.workspace.workspace_id;
+    await page.waitForTimeout(1200);
+    await tap(page, '.tab[data-view=waiting]'); await page.waitForTimeout(400);
+    await page.evaluate(() => { localStorage.removeItem('shepr.newtab'); localStorage.removeItem('shepr.openmode'); });
+    await page.click('#newproject'); await page.waitForSelector('#np-tabs'); await page.waitForTimeout(250);
+    check('existing: Start new is a sheet with two tabs, New project and Existing folder, and it opens on New',
+      (await page.$$eval('#np-tabs button', (b) => b.map((x) => x.textContent))).join() === 'New project,Existing folder' && await page.$eval('#np-tabs [data-tab=new]', (b) => b.classList.contains('on')) && (await page.$('#np-name')) !== null);
+    await page.click('#np-tabs [data-tab=existing]'); await page.waitForSelector('#ex-list .hrow', { timeout: 8000 });
+    const names = () => page.$$eval('#ex-list .hrow', (r) => r.map((x) => x.dataset.dir));
+    check('existing: it lists the folders that have no herdr project, the one with a conversation first, and leaves out files, hidden and underscore folders and one herdr already has a terminal in', (await names()).join() === 'resume-me,fresh-one');
+    check('existing: it says how many there are and how many are already open', /2 folders without a herdr project, 1 already open/.test(await page.textContent('#ex-count')));
+    check('existing: a git repository is marked', await page.$eval('#ex-list .hrow[data-dir=fresh-one] .exgit', (n) => /git/i.test(n.textContent)) && (await page.$('#ex-list .hrow[data-dir=resume-me] .exgit')) === null);
+    await page.screenshot({ path: `${OUT}/e1-existing-folder.png` });
+    const dis = () => page.$$eval('#ex-list .hrow', (rows) => rows.map((r) => [...r.querySelectorAll('button')].map((b) => (b.disabled ? 0 : 1)).join('')));
+    check('existing: Resume last is the default and is offered only where a conversation exists (Claude in resume-me, no Codex anywhere)', (await dis()).join() === '10,00');
+    await page.click('#sheet .seg:not(#np-tabs) button:last-child'); await page.waitForTimeout(200);
+    check('existing: Fresh session offers both agents on every folder', (await dis()).join() === '11,11');
+    await page.fill('#ex-search', 'fre'); await page.waitForTimeout(150);
+    check('existing: the search narrows the list', (await names()).join() === 'fresh-one');
+    await page.fill('#ex-search', ''); await page.click('#sheet .seg:not(#np-tabs) button:first-child'); await page.waitForTimeout(200);
+    await page.click('#ex-list .hrow[data-dir=resume-me] button:first-of-type'); await page.waitForSelector('#sheet .kv');
+    const kvx = await page.textContent('#sheet .kv'), h3x = await page.textContent('#sheet h3');
+    console.log('   open folder plan:', kvx.replace(/\s+/g, ' ').trim().slice(0, 300));
+    check('existing: the confirm sheet says Open this project, shows the folder as existing with nothing created or changed, and the exact command with no mkdir',
+      /Open this project/.test(h3x) && /exists, nothing will be created or changed/.test(kvx) && /cd \/tmp\/shepr-projects\/resume-me && echo CCC --continue/.test(kvx) && !/mkdir/.test(kvx) && /resumes the last conversation/.test(kvx));
+    await page.screenshot({ path: `${OUT}/e2-open-confirm.png` });
+    check('existing: nothing exists yet', !wsOf('resume-me'));
+    await page.waitForTimeout(800); await page.click('#sheet .btns .go');
+    await page.waitForFunction(() => /Opened resume-me/.test(document.body.textContent), null, { timeout: 8000 });
+    let ows = null, oout = '';
+    for (let i = 0; i < 12 && !(ows && oout.includes('CCC --continue')); i++) { await page.waitForTimeout(500); ows = wsOf('resume-me'); if (ows) oout = hr('pane', 'read', ows.workspace_id + ':p1', '--lines', '30'); }
+    check('existing: the herdr project exists with the folder name on its title bar', !!ows);
+    check('existing: the command ran in that folder and resumed the conversation', oout.includes('CCC --continue') && /shepr-projects\/resume-me/.test(oout));
+    check('existing: nothing in the folder was created, changed or removed', fs.readdirSync(R + '/resume-me').join() === 'notes.txt' && fs.readFileSync(R + '/resume-me/notes.txt', 'utf8') === 'keep me');
+    const prepO = (body) => page.evaluate(async (b) => { const body = JSON.stringify(Object.assign({ host: window.shepr.S.hello.name, kind: 'open_folder' }, b));
+      const r = await fetch('api/send/prepare', { method: 'POST', body, headers: Object.assign({ 'Content-Type': 'application/json', 'X-Shepr': '1' }, await window.shepr.signHeaders('POST', 'api/send/prepare', body)) });
+      return r.status + ' ' + (await r.text()); }, body);
+    const refused = [await prepO({ dir: '../etc', mode: 'fresh' }), await prepO({ dir: 'no-such-folder', mode: 'fresh' }), await prepO({ dir: 'fresh-one', mode: 'continue' }), await prepO({ dir: 'resume-me', mode: 'bogus' })];
+    console.log('   refused:', JSON.stringify(refused.map((b) => b.slice(0, 40))));
+    check('existing: the server refuses a path trick, a folder that is not there (it never creates one), a resume with nothing to resume, and a bad mode',
+      /^400 .*bad_dir/.test(refused[0]) && /^400 .*no_folder/.test(refused[1]) && /^400 .*nothing_to_resume/.test(refused[2]) && /^400 .*bad_mode/.test(refused[3]) && !fs.existsSync(R + '/no-such-folder'));
+    for (let i = 1; i <= 85; i++) fs.mkdirSync(R + '/bulk-' + String(i).padStart(2, '0'), { recursive: true });
+    await page.click('#newproject'); await page.waitForSelector('#ex-list .hrow', { timeout: 8000 });
+    check('existing: the sheet opens on the tab you used last', await page.$eval('#np-tabs [data-tab=existing]', (b) => b.classList.contains('on')));
+    check('existing: a long list shows the first 80 and says so, and counts them all', (await names()).length === 80 && /Showing 80 of 86/.test(await page.textContent('#ex-list')) && /86 folders without a herdr project, 2 already open/.test(await page.textContent('#ex-count')));
+    await page.fill('#ex-search', 'bulk-85'); await page.waitForTimeout(150);
+    check('existing: the search reaches a folder past the first 80', (await names()).join() === 'bulk-85' && !/Showing/.test(await page.textContent('#ex-list')));
+    await page.click('#sheet .btns button'); await page.waitForTimeout(300);
+    if (ows) hr('workspace', 'close', ows.workspace_id);
+    hr('workspace', 'close', busyWs);
+    fs.rmSync(R, { recursive: true, force: true });
+    await page.evaluate(() => { localStorage.removeItem('shepr.newtab'); localStorage.removeItem('shepr.openmode'); });
+  }
+
   // ---- photos and files: resize on the phone, store on the host, put the path in the message box, send nothing
   {
     const TINY_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');

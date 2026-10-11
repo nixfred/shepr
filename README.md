@@ -115,7 +115,7 @@ commands are listed: its skills are not read from here.
 
 ### Start new
 
-The big **Start new** button at the top of the Queue makes a brand-new project. It asks for a **project name** (what shows on
+The big **Start new** button at the top of the Queue opens a sheet with two tabs. **New project** (the first) makes a brand-new project. It asks for a **project name** (what shows on
 the herdr title bar) and a **folder** under `~/Projects` (suggested from the name, and refused unless it is one plain name: no
 slash, no leading dot or dash). The confirm sheet then shows the name, whether the folder will be created or already exists,
 the exact command, and what the `ccc` alias expands to on this host, and nothing happens until you confirm. Then herdr makes
@@ -125,6 +125,14 @@ the project in the background (it does not take over your screen) and types `mkd
 An optional **First message** gives the new project its opening task: it is appended to the command as one quoted word
 (`ccc 'fix the login bug'`), so quotes, `$`, backticks and `;` in it are just text and can never run anything. One line, up to
 500 characters; the confirm sheet shows it.
+
+**Existing folder** (the second tab) opens a folder you already have as a herdr project, without creating anything. The host lists the
+folders directly inside `~/Projects` that herdr has no terminal in (the same plain names Start new accepts), newest conversation first,
+with a `git` mark and when Claude or Codex last ran there. Search narrows the list. **Resume last** (the default) continues the last
+conversation in that folder and is offered only where there is one; **Fresh session** starts a new one. Tap **Claude** or **Codex** on a
+folder and the confirm sheet shows the project name, that the folder already exists and nothing in it will be created or changed, and the
+exact command (`cd ~/Projects/<folder> && ccc --continue`, or `codex resume --last`). A folder that is not there is refused: this tab never
+runs `mkdir`. It works on the machine Shepr runs on, so other machines are not listed.
 
 ### Photos and files
 

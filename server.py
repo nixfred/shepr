@@ -655,6 +655,8 @@ def build_plan(body):
         return plan_start(body)
     if body.get("kind") == "new_project":
         return plan_new_project(body)
+    if body.get("kind") == "open_folder":
+        return plan_open_folder(body)
     kind = body.get("kind")
     if kind not in ("text", "keys", "choose", "multi", "model", "effort", "sendnow"):
         raise HerdrError("bad_kind", f"this host's Shepr does not know the action {str(kind)[:30]!r}. It is older than the app on your "
@@ -887,7 +889,7 @@ def commit_plan(nonce):
         return commit_wake(plan)
     if plan["kind"] == "start":
         return commit_start(plan)
-    if plan["kind"] == "new_project":
+    if plan["kind"] in ("new_project", "open_folder"):   # the same two steps: make the herdr project, type the command
         return commit_new_project(plan)
     host = need_host(plan["host"])
     with pane_lock(plan["host"], plan["pane"]):   # verify and dispatch as one step per pane
@@ -1812,6 +1814,111 @@ def commit_new_project(plan):
     return {"ok": True, "sent": ["workspace", "run"], "pane": pane}
 
 
+# --------------------------------------------------------------------------------------------
+# an EXISTING folder opened as a herdr project: listed, planned and committed without creating or changing anything in it
+# --------------------------------------------------------------------------------------------
+FOLDERS_MAX = 600
+
+
+def _herdr_dirs(host):
+    """Every directory a herdr terminal on this host is working in."""
+    out = set()
+    for p in run_herdr(host["machine"], ["pane", "list"], timeout=9)["result"]["panes"]:
+        if isinstance(p, dict):
+            for k in ("foreground_cwd", "cwd"):
+                c = p.get(k)
+                if isinstance(c, str) and c:
+                    out.add(c.rstrip("/"))
+    return out
+
+
+def folders_view(host):
+    """The folders directly inside the projects folder that herdr has no terminal in, newest conversation first. Read only."""
+    if host["kind"] != "local":
+        raise HerdrError("local_only", "folders can only be listed on the machine Shepr runs on")
+    shown = os.path.expanduser(PROJECTS_DIR).rstrip("/")
+    base = os.path.realpath(shown)
+    try:
+        names = os.listdir(base)
+    except OSError:
+        names = []
+    try:
+        busy = _herdr_dirs(host)
+    except (HerdrError, KeyError, TypeError):
+        busy = set()   # herdr could not be read: every folder is offered rather than none
+    items, open_n = [], 0
+    for d in names:
+        if not DIR_RE.match(d) or d.endswith("."):
+            continue   # the same names Start new accepts: nothing hidden, nothing odd
+        path = os.path.join(base, d)
+        if not os.path.isdir(path):
+            continue
+        if any(c == p or c.startswith(p + os.sep) for c in busy for p in (path, os.path.join(shown, d))):
+            open_n += 1   # herdr already has a terminal in it: it is a project already
+            continue
+        cl, cx = project_last_active(path), codex_last_active(path)
+        items.append({"dir": d, "claude": cl, "codex": cx, "last": max(cl or 0, cx or 0) or None, "git": os.path.isdir(os.path.join(path, ".git"))})
+    items.sort(key=lambda i: (-(i["last"] or 0), i["dir"].lower()))
+    return {"base": PROJECTS_DIR, "items": items[:FOLDERS_MAX], "total": len(items), "open": open_n, "at": time.time()}
+
+
+def plan_open_folder(body):
+    """Open a folder that already exists as a new herdr project and start Claude or Codex in it. It never creates the folder, and
+    nothing in it is touched: a folder that is not there is refused, with no mkdir anywhere in the command."""
+    host = need_host(str(body.get("host", "")))
+    if host["kind"] != "local":
+        raise HerdrError("local_only", "opening an existing folder only works on the machine Shepr runs on")
+    d = body.get("dir")
+    if not isinstance(d, str) or not DIR_RE.match(d) or d.endswith("."):
+        raise HerdrError("bad_dir", "the folder must be one plain name: letters, digits, dot, dash or underscore, starting with a letter or digit")
+    agent = body.get("agent", "claude")
+    if agent not in AGENTS:
+        raise HerdrError("bad_agent", "agent must be claude or codex")
+    mode = body.get("mode")
+    if mode not in ("continue", "fresh"):
+        raise HerdrError("bad_mode", "mode must be continue or fresh")
+    name = body.get("name") if body.get("name") is not None else d
+    if not isinstance(name, str) or CTRL_RE.search(name) or "\n" in name:
+        raise HerdrError("bad_name", "the project name must be plain text on one line")
+    name = " ".join(name.split())
+    if not 1 <= len(name) <= 60:
+        raise HerdrError("bad_name", "the project name must be 1 to 60 characters")
+    path = f"{PROJECTS_DIR.rstrip('/')}/{d}"
+    real = os.path.expanduser(path)
+    if not os.path.isdir(real):
+        raise HerdrError("no_folder", f"{path} is not a folder here, so nothing was opened. This never creates one: use New project for that.")
+    who = AGENTS[agent]
+    last = project_last_active(os.path.realpath(real)) if agent == "claude" else codex_last_active(os.path.realpath(real))
+    if mode == "continue" and not last:
+        raise HerdrError("nothing_to_resume", f"there is no {who} conversation recorded in that folder to resume. Choose Fresh session.")
+    if agent == "claude":
+        launcher = NEW_CMD + (" --continue" if mode == "continue" else "")
+    else:
+        launcher = CODEX_CMD + (" resume --last" if mode == "continue" else "")
+    cmd = f"cd {path} && {launcher}"
+    lines = [("Title-bar name", name), ("Folder", path + "   (exists, nothing will be created or changed)"), ("Host", host["id"]),
+             ("Starts", f"{who} " + (f"and resumes the last conversation there, from {ago(last)}" if mode == "continue" else "with a new conversation"))]
+    try:
+        if any(w.get("label") == name for w in run_herdr(host["machine"], ["workspace", "list"], timeout=8)["result"]["workspaces"]):
+            lines.append(("Heads up", "a herdr project with this name already exists. A second one will be made."))
+        shown = os.path.expanduser(PROJECTS_DIR).rstrip("/")
+        if any(c == p or c.startswith(p + os.sep) for c in _herdr_dirs(host) for p in (os.path.realpath(real), os.path.join(shown, d))):
+            lines.append(("Heads up", "herdr already has a terminal in this folder. A second project will be made."))
+    except (HerdrError, KeyError, TypeError):
+        pass
+    lines.append(("Then types", cmd))
+    ex = alias_expansion(NEW_CMD) if agent == "claude" and NEW_CMD == "ccc" else None
+    if ex:
+        lines.append((f"{NEW_CMD} runs", ex))
+    lines.append(("Note", "makes a new herdr project in the background (it will not take over your screen), then types that command into it."))
+    plan = {"nonce": secrets.token_urlsafe(18), "host": host["id"], "pane": "", "kind": "open_folder",
+            "steps": [{"op": "new_project", "label": name, "cmd": cmd, "cwd": real}], "expires": time.time() + NONCE_TTL_S}
+    register_plan(plan)
+    return {"nonce": plan["nonce"], "kind": "open_folder", "expires_s": NONCE_TTL_S, "approves": False,
+            "target": {"host": host["id"], "pane": "", "title": name, "project": "", "status": ""},
+            "lines": [{"k": k, "v": v} for k, v in lines]}
+
+
 def plan_wake(body):
     """Send one message to each of several SLEEPING (idle or finished) sessions. A blocked session is a question
     waiting on a person, so it is refused here: this can never answer a dialog, let alone approve one."""
@@ -2389,6 +2496,8 @@ class Handler(SimpleHTTPRequestHandler):
                                                    "this is the most herdr keeps (about 1,000 lines)"})
             if not post and u.path == "/api/asleep":
                 return self.json_out(200, asleep_view())
+            if not post and u.path == "/api/folders":
+                return self.json_out(200, folders_view(need_host(q.get("host") or LOCAL)))
             if not post and u.path == "/api/commands":
                 return self.json_out(200, commands_view(need_host(q.get("host", ""))))
             if not post and u.path == "/api/hosts":

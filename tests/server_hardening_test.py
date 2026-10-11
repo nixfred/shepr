@@ -434,4 +434,64 @@ never_closes[0] = True; err_stuck = commit_skip(); order_stuck = list(order)
 check("skip: committed in order, Esc then the wait then the words", err_ok is None and order_ok == ["keys", "await_clear", "prompt"])
 check("skip: when the question will not close, the words are never sent", err_stuck == "still_blocked" and order_stuck == ["keys", "await_clear"])
 
+# ---- an EXISTING folder opened as a herdr project: listed, planned and committed without creating or changing anything in it
+import tempfile, shutil
+froot = tempfile.mkdtemp()
+for d in ("plain", "with-git/.git", "has-history", "busy", ".hidden", "_archive", "bad name"):
+    os.makedirs(os.path.join(froot, d))
+open(os.path.join(froot, "a-file.txt"), "w").write("x")
+os.symlink(os.path.join(froot, "plain"), os.path.join(froot, "linked"))
+srv.PROJECTS_DIR = froot
+srv.READONLY = False
+LOCALH = {"id": "gus", "machine": None, "kind": "local", "enabled": True}
+srv.need_host = lambda h: LOCALH
+srv.run_herdr = lambda machine, args, timeout=10, want_json=True: ({"result": {"panes": [{"pane_id": "w1:p1", "foreground_cwd": os.path.join(froot, "busy", "sub"), "cwd": "/x"}]}}
+                                                                   if args[:2] == ["pane", "list"] else {"result": {"workspaces": [{"label": "dup"}]}})
+srv.project_last_active = lambda cwd: 2000.0 if cwd.endswith("has-history") else None
+srv.codex_last_active = lambda cwd: 1000.0 if cwd.endswith("with-git") else None
+before = sorted(os.listdir(froot))
+fv = srv.folders_view(LOCALH)
+fnames = [i["dir"] for i in fv["items"]]
+check("folders: only plain folders directly inside the projects folder are listed: no file, no dot or underscore folder, no name with a space", set(fnames) == {"plain", "with-git", "has-history", "linked"})
+check("folders: one herdr already has a terminal in is left out and counted", "busy" not in fnames and fv["open"] == 1)
+check("folders: newest conversation first, then the rest by name", fnames == ["has-history", "with-git", "linked", "plain"])
+fi = {i["dir"]: i for i in fv["items"]}
+check("folders: each says whether it is a git repo and when Claude or Codex last ran there", fi["with-git"]["git"] is True and fi["plain"]["git"] is False and fi["has-history"]["claude"] == 2000.0 and fi["with-git"]["codex"] == 1000.0 and fi["plain"]["last"] is None)
+try: srv.folders_view({"id": "vic", "machine": "vic", "kind": "remote"}); remote_code = None
+except srv.HerdrError as e: remote_code = e.code
+check("folders: another machine cannot be listed from here", remote_code == "local_only")
+def opf(**kw):
+    try: return srv.build_plan(dict({"kind": "open_folder", "host": "gus"}, **kw))
+    except srv.HerdrError as e: return e.code
+check("open folder: path tricks and odd names are refused", all(opf(dir=x, mode="fresh") == "bad_dir" for x in ("../x", "a/b", ".x", "x.", "", 5, "a;b")))
+check("open folder: a folder that is not there is never created, it is refused", opf(dir="nope", mode="fresh") == "no_folder" and not os.path.exists(os.path.join(froot, "nope")))
+check("open folder: a bad mode, agent or name is refused", opf(dir="plain", mode="x") == "bad_mode" and opf(dir="plain", mode="fresh", agent="gpt") == "bad_agent"
+      and opf(dir="plain", mode="fresh", name="a\nb") == "bad_name" and opf(dir="plain", mode="fresh", name="x" * 61) == "bad_name")
+check("open folder: resuming where nothing is recorded is refused, for Claude and for Codex", opf(dir="plain", mode="continue") == "nothing_to_resume" and opf(dir="plain", mode="continue", agent="codex") == "nothing_to_resume")
+srv.NEW_CMD, srv.CODEX_CMD = "ccc", "codex"
+cases = {("has-history", "continue", "claude"): f"cd {froot}/has-history && ccc --continue", ("plain", "fresh", "claude"): f"cd {froot}/plain && ccc",
+         ("with-git", "continue", "codex"): f"cd {froot}/with-git && codex resume --last", ("plain", "fresh", "codex"): f"cd {froot}/plain && codex"}
+good = True
+for (d, mode, agent), want in cases.items():
+    pl = srv.build_plan({"kind": "open_folder", "host": "gus", "dir": d, "mode": mode, "agent": agent}); st = srv.PLANS[pl["nonce"]]["steps"][0]
+    good = good and st["cmd"] == want and "mkdir" not in st["cmd"] and st["op"] == "new_project" and st["cwd"] == os.path.join(froot, d) and pl["approves"] is False and pl["kind"] == "open_folder"
+check("open folder: the command is cd then the agent, resuming or fresh, never mkdir, and the plan approves nothing", good)
+pl = srv.build_plan({"kind": "open_folder", "host": "gus", "dir": "plain", "mode": "fresh", "name": "dup"})
+lk = {l["k"]: l["v"] for l in pl["lines"]}
+check("open folder: the sheet says the folder exists and nothing will be created, and warns that a herdr project has that name", "exists" in lk["Folder"] and "nothing will be created" in lk["Folder"] and any(l["k"] == "Heads up" for l in pl["lines"]))
+pb = srv.build_plan({"kind": "open_folder", "host": "gus", "dir": "busy", "mode": "fresh"})
+check("open folder: a folder herdr already has a terminal in is allowed, with a warning", any(l["k"] == "Heads up" and "terminal in this folder" in l["v"] for l in pb["lines"]))
+srv.READONLY = True
+check("open folder: a read-only server refuses it", opf(dir="plain", mode="fresh") == "read_only")
+srv.READONLY = False
+calls = []
+srv.run_herdr = lambda machine, args, timeout=10, want_json=True: (calls.append(list(args)) or ({"result": {"root_pane": {"pane_id": "w9:p1"}}} if args[:2] == ["workspace", "create"] else ""))
+pl = srv.build_plan({"kind": "open_folder", "host": "gus", "dir": "plain", "mode": "fresh"})
+calls.clear()   # planning looks at herdr too; only what the COMMIT does is of interest here
+srv.commit_plan(pl["nonce"])
+check("open folder: committing makes the herdr project in that folder, then types the command, and the folder itself is untouched",
+      calls[0][:4] == ["workspace", "create", "--label", "plain"] and calls[0][calls[0].index("--cwd") + 1] == os.path.join(froot, "plain") and calls[1][:3] == ["pane", "run", "w9:p1"]
+      and calls[1][3] == f"cd {froot}/plain && ccc" and sorted(os.listdir(froot)) == before and os.listdir(os.path.join(froot, "plain")) == [])
+shutil.rmtree(froot)
+
 sys.exit(0 if ok else 1)
