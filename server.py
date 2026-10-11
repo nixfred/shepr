@@ -1027,6 +1027,20 @@ NONCES = {}
 PAIR_FAILS = []
 AUTH_ERR = {"unpaired": 401, "unknown_device": 401, "bad_signature": 401, "stale": 401, "replay": 401,
             "bad_code": 403, "slow_down": 429}
+HTTP_STATUS = {"moved_on": 409, "expired": 410, "read_only": 403, "bad_host": 404,
+               "agent_not_found": 404, "pane_not_found": 404}   # a pane herdr no longer has is gone, not a bad request
+UPSTREAM_ERR = {"timeout", "error", "bad_json", "no_herdr", "agent_blocked", "agent_not_ready"}
+
+
+def http_status(code):
+    """HerdrError code to an HTTP status. Unknown codes stay 400."""
+    if code in AUTH_ERR:
+        return AUTH_ERR[code]
+    if code in HTTP_STATUS:
+        return HTTP_STATUS[code]
+    if code in UPSTREAM_ERR:
+        return 502
+    return 400
 
 
 def devices():
@@ -2394,9 +2408,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json_out(200, commit_plan(body.get("nonce")))
             return self.json_out(404, {"error": "not_found", "message": u.path})
         except HerdrError as e:
-            code = AUTH_ERR.get(e.code) or {"moved_on": 409, "expired": 410, "read_only": 403, "bad_host": 404}.get(
-                e.code, 502 if e.code in ("timeout", "error", "bad_json", "no_herdr", "agent_blocked", "agent_not_ready") else 400)
-            return self.json_out(code, {"error": e.code, "message": e.message})
+            return self.json_out(http_status(e.code), {"error": e.code, "message": e.message})
         except (ValueError, KeyError) as e:
             return self.json_out(400, {"error": "bad_request", "message": str(e)})
 

@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v37';   // keep equal to sw.js VERSION: shown in Keys and logged by the host, so you can see which app a phone is running
+const BUILD = 'v38';   // keep equal to sw.js VERSION: shown in Keys and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -1133,7 +1133,7 @@ function openPeek(a, ctx) {
   openSheet(box);
   api('api/pane?host=' + encodeURIComponent(a.host) + '&pane=' + encodeURIComponent(a.pane) + '&lines=14')
     .then((r) => { renderBlocks(pre, r.text); pre.scrollTop = pre.scrollHeight; })
-    .catch((e) => { pre.textContent = 'Could not read: ' + e.message; });
+    .catch((e) => { pre.textContent = sessionMissing(e) ? 'That session is gone.' : 'Could not read: ' + e.message; });
 }
 
 // ---- Go To: every session on every host, searchable
@@ -1634,6 +1634,9 @@ function renderTail(text) {
   return near;
 }
 
+function sessionMissing(e) {
+  return e && (e.code === 'agent_not_found' || e.code === 'pane_not_found');
+}
 let tailBusy = false;
 // How old what you are reading is: "live" while the refresh is keeping up, amber once it has stopped (a stale screen must not look current).
 function paintTailAge() {
@@ -1665,6 +1668,7 @@ function loadTail(force) {
     })
     .catch((e) => {
       if (S.cur && S.cur.pane === at.pane) {
+        if (sessionMissing(e)) { closeDetail(); notify('That session is gone.', false); return; }
         $('tail').textContent = e.code === 'bad_host' ? 'That host is not reachable.' : 'Could not read this session: ' + e.message;
         S.agent = null; paintDock();
       }

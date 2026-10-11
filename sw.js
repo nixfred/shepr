@@ -2,7 +2,7 @@
    Goal: when the tailnet is unreachable, the user sees YOUR app with YOUR message,
    not Safari's error page. It is NOT a general offline database. */
 
-const VERSION = 'shepr-v37';
+const VERSION = 'shepr-v38';
 // The app shell: everything needed to paint a useful screen with no network.
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png'];
 

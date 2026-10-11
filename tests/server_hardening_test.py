@@ -375,4 +375,10 @@ hv = srv.hosts_view()
 vic = next(h for h in hv["saved"] if h["id"] == "vic")
 check("hosts: a down machine reports its error and when it last answered, for the Hosts page", vic["status"] == "down" and vic["error"].startswith("timeout") and vic["last_ok"] == 1791600000.0)
 
+check("gone session: herdr agent_not_found and pane_not_found are 404, so the phone can leave",
+      srv.http_status("agent_not_found") == 404 and srv.http_status("pane_not_found") == 404)
+check("gone session: a bad request stays 400, a dead herdr stays 502, an unknown host stays 404",
+      srv.http_status("bad_pane") == 400 and srv.http_status("timeout") == 502 and srv.http_status("bad_host") == 404
+      and srv.http_status("unpaired") == 401)
+
 sys.exit(0 if ok else 1)
