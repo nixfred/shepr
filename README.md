@@ -67,7 +67,7 @@ On the iPhone, in **Safari**: open `https://<this-host>.<your-tailnet>.ts.net:87
 | **Radar** | Every session on every host as a radar, with the counts (waiting, finished, working, idle) and the longest wait above it (below). |
 | **Subs** | Your Claude, Codex, Kimi and Grok subscriptions on one animated page: how much of each plan is used, and whether you are banked, on pace or behind (below). |
 | **Hosts** | Hosts herdr can reach (turn saved ones on or off) and a tailnet scan for more. |
-| **Keys** | This phone's key, the phones the host trusts (revoke), pair another, **Top spacing**, and the app build (`Shepr v8`) so you can tell which version a phone is running. |
+| **Settings** | Four sections that each fit one screen. **Display**: text size, splash screen (Full, Short or Off), animations, which tab to open on, how often to refresh, slash commands, top spacing. **Alerts**: notifications. **Phones**: this phone's key, the phones the host trusts (revoke), pair another, forget this one. **About**: the build, gestures, reload, clear unsent drafts. Two links sit at the very bottom: nixfred.com and this repository. |
 
 The Queue and Radar show **every host at once**; each session carries a coloured pill naming its machine (`GUS`, `VIC`), and the chips on top (`All hosts`, `gus 3`, `vic 1`) are only a filter if you tap one. `SHEPR_LOCAL_ONLY=1` makes the server ignore remote machines (the tests use it).
 
@@ -138,7 +138,7 @@ image attachment. Sessions on another host are refused, because the file would b
 
 ### Notifications
 
-**Keys > Notifications > Turn on notifications** (iPhone only offers this to an app on the Home Screen, iOS 16.4 or later). Then
+**Settings > Alerts > Turn on notifications** (iPhone only offers this to an app on the Home Screen, iOS 16.4 or later). Then
 an agent that blocks buzzes your phone, and the app icon shows how many are waiting. Optionally also when one finishes.
 How it works: the host sends an **empty** web push ("something changed"), signed with its own VAPID key (made once, kept `0600`).
 The phone's service worker then asks the host what changed, signed with the phone's key, and shows project names only, never a
@@ -215,6 +215,7 @@ is in) plus a one-use nonce. `commit` runs it. The preview is bound to the agent
 moved on while you looked, nothing is sent. A failed send is reported and never retried; a failed write may still
 have landed, and the message says so.
 
+- **Words at a numbered question are never typed into it** (a digit would pick an option). Shepr keeps your message in view and offers **Skip and send**: Esc closes the question without answering it, Shepr waits until it has closed, then sends your message as an ordinary prompt. You review both steps first. If the question will not close, nothing is sent and your words stay in the box.
 - A blocked agent gets keys, not prompts: option buttons (it works out the ↓ presses from the screen), an
   arrow/Enter/Esc pad, or a typed line. Options that read like approvals are marked amber and the confirm sheet says so.
 - An idle agent gets a normal prompt. A working agent only accepts `Esc` (interrupt) or a queued prompt.
@@ -260,7 +261,7 @@ preview-and-confirm sheet and run `herdr machine add|enable|disable`.
 - Tested against an isolated herdr session: the server, the signing scheme (WebCrypto signatures checked by the
   pure-Python verifier), QR generation and scanning (fake camera feed through jsQR), gestures, wake, tick-several
   questions, the text renderer, layout at iPhone 14 size, offline start, and a real tailnet scan. Paired and in use
-  on one real iPhone (iOS 18.7); other devices and iOS versions are untested. `Keys > Top spacing` exists because a
+  on one real iPhone (iOS 18.7); other devices and iOS versions are untested. `Settings > Display > Top spacing` exists because a
   real phone clipped the header.
 - Tick-several questions: "Type something" is not tickable from the phone yet.
 - Sending a prompt to an idle agent could not be exercised against a real agent in the isolated test session

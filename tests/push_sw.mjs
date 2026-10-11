@@ -33,7 +33,7 @@ await p.evaluate((port) => {
   PushManager.prototype.getSubscription = async () => window.__subs[0] || null;
   PushManager.prototype.subscribe = async (o) => { window.__subKey = Array.from(new Uint8Array(o.applicationServerKey)); window.__subs = [sub]; return sub; };
 }, PUSH_PORT);
-await p.click('.tab[data-view=keys]'); await p.waitForSelector('#notifycard');
+await p.click('.tab[data-view=settings]'); await p.click('#setseg [data-seg=alerts]'); await p.waitForSelector('#notifycard');
 check('keys: the Notifications card offers to turn them on', !!(await p.$('#pushon')));
 await p.screenshot({ path: '/tmp/claude-1000/shots/n1-notify-card.png' });
 await p.click('#pushon'); await p.waitForSelector('#notifycard .chk', { timeout: 8000 });

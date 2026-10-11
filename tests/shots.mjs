@@ -48,7 +48,7 @@ await p.click('#main .secrow .mini-btn'); await p.waitForSelector('#sheet .chk')
 await p.click('#sheet .btns .go'); await p.waitForSelector('#sheet .kv'); await p.waitForTimeout(900);
 await shot('wake-confirm');
 await p.click('#sheet .btns button:first-child');
-await tap('.tab[data-view=keys]'); await p.waitForTimeout(1200); await shot('keys');
+await tap('.tab[data-view=settings]'); await p.waitForTimeout(1200); await shot('settings');
 await b.close();
 
 // ---- the montage: five captures in phone frames

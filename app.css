@@ -234,7 +234,7 @@ button{font:inherit;color:inherit}
 .drow.opts button.tog.on{background:rgba(0,240,255,.16);border-color:var(--accent);color:#fff}
 .drow.opts button.tog-go{flex:1.8 1 0;background:var(--accent);border-color:var(--accent);color:#04141a}
 .compose{display:flex;gap:8px;align-items:flex-end}
-.compose textarea{flex:1 1 auto;min-width:0;resize:none;max-height:132px;min-height:44px;padding:10px 12px;
+.compose textarea{flex:1 1 auto;min-width:0;resize:none;min-height:44px;padding:10px 12px;
   border-radius:12px;border:1px solid var(--line);background:var(--bg);color:#fff;
   /* WHY: iOS zooms the whole page on focus when an input's font is under 16px, and with the page
      locked there is no way back out. Keep it at 16. */
@@ -694,7 +694,7 @@ button{font:inherit;color:inherit}
 .at-th img{width:100%;height:100%;object-fit:cover;display:block}
 .at-mid{min-width:0;display:flex;flex-direction:column;gap:5px}
 .at-n{font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.at-c{width:100%;min-width:0;padding:8px 10px;font-size:16px;background:#060b12;border:1px solid var(--line);color:var(--txt);border-radius:8px}
+.at-c{display:block;width:100%;min-width:0;resize:none;padding:8px 10px;font:16px/1.3 -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;background:#060b12;border:1px solid var(--line);color:var(--txt);border-radius:8px;overflow-y:auto}
 .at-c:focus{outline:none;border-color:var(--accent)}
 .at-x{width:38px;height:38px;font-size:22px;line-height:1;background:none;border:1px solid var(--line);color:var(--dim);border-radius:8px}
 .at-more{width:100%;min-height:42px;margin-bottom:6px;background:none;border:1px dashed var(--accent);color:var(--accent);font-weight:700;border-radius:10px}
@@ -752,3 +752,44 @@ button{font:inherit;color:inherit}
 /* a card Shepr cannot measure: the reason in plain type, then the fix as its own dim line */
 .sc-l.plain{font:700 14px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:0;color:var(--txt);margin:4px 0 2px}
 .sc-note.fix{font-size:12.5px;line-height:1.4;color:var(--dim);margin-top:0}
+
+/* ---- Settings: one fixed screen (Law 17). A bar of four sections, the chosen section filling the middle, two links pinned at the bottom. ---- */
+.scroll.setpage{overflow:hidden}
+.setseg{flex:0 0 auto;display:flex;gap:6px}
+.setseg .mini-btn{flex:1 1 0;min-height:40px;padding:0 4px;font-size:15px}
+.setseg .mini-btn.on{background:rgba(0,240,255,.16);color:#fff}
+.setbody{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:6px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.setbody>*{flex:0 0 auto}
+.setrow{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:1px 10px;min-height:46px;padding:5px 12px;background:var(--card);border:1px solid var(--line);border-radius:12px}
+.setrow .ttl{font-size:16px;font-weight:700;color:#fff;line-height:1.2}
+.setrow .sub{grid-column:1/-1;font-size:13px;line-height:1.25;color:var(--dim)}
+.segc,.stepc{display:flex;align-items:center;gap:4px}
+.segb{min-height:34px;min-width:40px;padding:0 8px;border-radius:9px;border:1px solid var(--line);background:none;color:var(--dim);font-weight:800;font-size:14.5px}
+.segb.on{border-color:var(--accent);background:rgba(0,240,255,.16);color:#fff}
+.stepc .val{min-width:42px;text-align:center;font-weight:800;color:#fff}
+.setfoot{flex:0 0 auto;display:flex;gap:8px;padding-top:2px}
+.setfoot a{flex:1 1 0;display:flex;align-items:center;justify-content:center;min-height:46px;padding:0 6px;border-radius:12px;border:1px solid var(--accent);background:rgba(0,240,255,.06);color:var(--accent);font-weight:800;font-size:15.5px;text-decoration:none;text-align:center}
+.setfoot a:active{background:rgba(0,240,255,.18)}
+
+/* ---- a question that cannot take your words: the sheet keeps them in view ---- */
+.skipmsg{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px;max-height:24vh;overflow-y:auto;overflow-x:hidden;white-space:pre-wrap;word-break:break-word;font-size:15px;line-height:1.35;color:#fff}
+
+/* ---- Settings > Animations: Off. Everything lands on its final frame at once. ---- */
+html[data-motion=off] *,html[data-motion=off] *::before,html[data-motion=off] *::after{animation-duration:.001ms !important;animation-delay:0s !important;animation-iteration-count:1 !important;transition-duration:.001ms !important;transition-delay:0s !important}
+
+/* ---- Settings, tightened so every section fits a short phone too; the chosen section is lit and the others dim ---- */
+.setseg .mini-btn{min-height:38px;border-color:var(--line);color:var(--dim)}
+.setseg .mini-btn.on{border-color:var(--accent);background:rgba(0,240,255,.16);color:#fff}
+.setbody{gap:5px}
+.setrow{min-height:42px;padding:4px 12px}
+.segb{min-height:32px}
+.setfoot a{min-height:44px}
+.setbody .card{padding:9px 12px}
+.setbody .card h2{font-size:15.5px;margin-bottom:3px}
+.setbody .card p{font-size:14.5px;margin-bottom:3px}
+.setbody .code{font-size:12.5px;padding:6px 8px;margin-top:4px}
+.setbody .btns button{min-height:44px;font-size:16px}
+.setbody .hrow{padding:7px 12px}
+.setbody .sec{margin:4px 2px 0}
+.setbody>.devbox{flex:1 1 60px;min-height:60px;max-height:none}
+.devbox.more{-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 22px),transparent);mask-image:linear-gradient(to bottom,#000 calc(100% - 22px),transparent)}

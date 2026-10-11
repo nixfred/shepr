@@ -672,9 +672,17 @@ def build_plan(body):
         if not isinstance(text, str) or not text.strip() or len(text) > 4000 or "\x00" in text:
             raise HerdrError("bad_text", "text must be 1 to 4000 characters")
         text = text.replace("\r\n", "\n").replace("\r", "\n")
-        if status == "blocked":
+        if status == "blocked" and body.get("skip") is True:
+            # Words cannot be typed into a question (a numbered pick reads them as keystrokes), so the person chose to close the
+            # question first. Esc closes it WITHOUT answering it: nothing is approved (a permission request is refused). The words go
+            # in only once the agent has left "blocked", as an ordinary prompt, so they may be several lines. Never sent to an agent
+            # that is not blocked: Esc would interrupt its work.
+            steps = [{"op": "keys", "keys": ["esc"]}, {"op": "await_clear"}, {"op": "prompt", "text": text}]
+            lines = [("Closes the question", "Esc. Nothing is answered or approved. If it is a permission request, this refuses it."),
+                     ("Then sends as a prompt", text)]
+        elif status == "blocked":
             if "\n" in text:
-                raise HerdrError("bad_text", "a blocked agent is at a dialog: one line only, a newline would submit early")
+                raise HerdrError("blocked_text", "a blocked agent is at a dialog, which takes one line. Your message has more than one.")
             # A numbered menu reads typed characters as keystrokes (a digit picks that option), so words typed at one must never be
             # sent as they are. Fred, 2026-10-10: a sentence sent from the message box picked option 1 of a question.
             menu = parse_menu(read_tail(host, pane, 80))
@@ -831,8 +839,20 @@ def build_plan(body):
     }
 
 
+AWAIT_CLEAR_S = float(os.environ.get("SHEPR_AWAIT_CLEAR_S", "5"))   # how long to wait for a question to close after Esc
+
+
 def run_step(host, pane, step):
     m = host["machine"]
+    if step["op"] == "await_clear":
+        # After Esc the question closes and the agent leaves "blocked". Words go in only then, and only if it did.
+        end = time.time() + AWAIT_CLEAR_S
+        while True:
+            if get_agent(host, pane)["agent_status"] != "blocked":
+                return None
+            if time.time() >= end:
+                raise HerdrError("still_blocked", "the question did not close, so your words were not sent")
+            time.sleep(0.25)
     if step["op"] == "keys":
         return run_herdr(m, ["pane", "send-keys", pane] + step["keys"], timeout=10, want_json=False)
     if step["op"] == "text":

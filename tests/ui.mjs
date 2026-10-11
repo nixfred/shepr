@@ -299,9 +299,10 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
   await tap(page, '.tab[data-view=hosts]'); await page.waitForTimeout(900);
   await page.screenshot({ path: `${OUT}/h1-hosts.png` });
   check('Hosts view lists the local host and vic (disabled)', (await page.textContent('#main')).includes('vic'));
-  await tap(page, '.tab[data-view=keys]'); await page.waitForTimeout(900);
-  await page.screenshot({ path: `${OUT}/k1-keys.png` });
-  check('Keys view shows the device fingerprint', (await page.textContent('#main')).includes('SHA256:'));
+  await tap(page, '.tab[data-view=settings]'); await page.waitForTimeout(900);
+  await page.click('#setseg [data-seg=phones]'); await page.waitForTimeout(500);
+  await page.screenshot({ path: `${OUT}/k1-settings-phones.png` });
+  check('Settings > Phones shows the device fingerprint', (await page.textContent('#main')).includes('SHA256:'));
 
   // ---- tick-several questions: tapping only ticks on the phone, Submit shows exactly what will be pressed
   {
@@ -460,7 +461,7 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     await hold(page, '.tab[data-view=waiting]', 900); await page.waitForSelector('#sheet:not([hidden]) .search'); await page.fill('#sheet .search', LONG); await page.waitForTimeout(300);
     await noSide('go-to (long search)');
     await page.evaluate(() => document.getElementById('shade').click()); await page.waitForTimeout(300);
-    for (const v of ['all', 'hosts', 'keys']) { await tap(page, `.tab[data-view=${v}]`); await page.waitForTimeout(500); await noSide('tab ' + v); }
+    for (const v of ['all', 'hosts', 'settings']) { await tap(page, `.tab[data-view=${v}]`); await page.waitForTimeout(500); await noSide('tab ' + v); }
     await tap(page, '.tab[data-view=waiting]'); await page.waitForTimeout(300);
     await page.unroute('**/api/pane*'); await page.unroute('**/api/history*');
 
@@ -642,6 +643,11 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     const rows = await page.$$eval('.at-row', (n) => n.length);
     check('photos: choosing three shows three rows, each with a thumbnail and a comment box', rows === 3 && (await page.$$eval('.at-row .at-th', (n) => n.length)) === 3 && (await page.$$eval('.at-row .at-c', (n) => n.length)) === 3);
     check('photos: the sheet says how many', /Attach 3 photos/.test(await page.textContent('#sheet h3')));
+    await page.waitForTimeout(400);
+    await page.fill('.at-row:nth-child(1) .at-c', 'Then this happened. Fix this edge case but do not make the user lose what they typed. It should keep every word visible while I type it.'); await page.waitForTimeout(300);
+    const ac = await page.$eval('.at-row:nth-child(1) .at-c', (t) => { const cs = getComputedStyle(t), lh = parseFloat(cs.lineHeight); return { tag: t.tagName, h: t.clientHeight, atEnd: t.scrollTop + t.clientHeight >= t.scrollHeight - 1, lines: (t.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)) / lh }; });
+    check('photos: the comment box grows as you type, up to four lines when photos share the sheet, and the end of what you typed stays in view', ac.tag === 'TEXTAREA' && ac.h > 44 && ac.atEnd && ac.lines <= 4.1);
+    await page.fill('.at-row:nth-child(1) .at-c', '');
     await page.waitForTimeout(600);   // let the sheet finish sliding up
     check('photos: the Cancel and Attach buttons are on screen with three photos listed', await page.evaluate(() => { const b = document.querySelector('#sheet .btns'); return b.getBoundingClientRect().bottom <= window.innerHeight + 1; }));
     await page.screenshot({ path: `${OUT}/p2-attach-sheet.png` });
@@ -691,9 +697,10 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
 
   // ---- the Notifications card is on the Keys tab
   {
-    await tap(page, '.tab[data-view=keys]'); await page.waitForTimeout(600);
+    await tap(page, '.tab[data-view=settings]'); await page.waitForTimeout(600);
+    await page.click('#setseg [data-seg=alerts]'); await page.waitForTimeout(400);
     const c = await page.textContent('#notifycard').catch(() => '');
-    check('notifications: the Keys tab has a Notifications card that says what it does and how to enable it', /Notifications/.test(c) && /(Turn on notifications|Home Screen|blocked)/.test(c));
+    check('notifications: Settings > Alerts has a Notifications card that says what it does and how to enable it', /Notifications/.test(c) && /(Turn on notifications|Home Screen|blocked)/.test(c));
     await tap(page, '.tab[data-view=waiting]'); await page.waitForTimeout(300);
   }
 
@@ -793,7 +800,7 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     check('radar: four counts on top, Waiting Finished Working Idle, which are also the legend', rg.tiles.length === 4 && /Waiting/.test(rg.tiles[0]) && /Finished/.test(rg.tiles[1]) && /Working/.test(rg.tiles[2]) && /Idle/.test(rg.tiles[3]) && (await page.$('.rleg')) === null);
     check('radar: the radar is back to the full page: it fills the screen under the counts, with nothing else under it, and nothing scrolls', rg.radarShare > 0.7 && rg.above && rg.noBudget && !rg.scrolls && !rg.side);
     await page.screenshot({ path: `${OUT}/r1-radar-page.png` });
-    check('there is no Go tab any more: Queue, Radar, Subs, Hosts, Keys', (await page.$$eval('.tab', (n) => n.map((x) => x.dataset.view).join())) === 'waiting,all,subs,hosts,keys');
+    check('there is no Go tab any more, and Keys is now Settings: Queue, Radar, Subs, Hosts, Settings', (await page.$$eval('.tab', (n) => n.map((x) => x.dataset.view + ':' + x.querySelector('span:not(.badge)').textContent).join())) === 'waiting:Queue,all:Radar,subs:Subs,hosts:Hosts,settings:Settings');
     // the Subs page: every subscription listed with its numbers, no tap needed, and it animates in
     await tap(page, '.tab[data-view=subs]'); await page.waitForSelector('.sc', { timeout: 10000 });
     const anim = await page.evaluate(() => ({ enter: document.getElementById('budget').classList.contains('enter'), card: getComputedStyle(document.querySelector('.sc')).animationName, draw: getComputedStyle(document.querySelector('.sc .bd-line')).animationName, ping: getComputedStyle(document.querySelector('.sc .bd-ping')).animationName }));
@@ -832,7 +839,7 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     await openK(keys[0]);
     await page.click('#msg'); await page.keyboard.type('word '.repeat(80), { delay: 0 });
     const sc = await page.evaluate(() => { const m = document.getElementById('msg'); return { atBottom: m.scrollTop + m.clientHeight >= m.scrollHeight - 3, h: m.getBoundingClientRect().height, tall: m.scrollHeight > m.clientHeight }; });
-    check('message box: typing a long message keeps what you are typing in view (the box scrolls to the end, up to five lines)', sc.tall && sc.atBottom && sc.h > 100 && sc.h <= 134);
+    check('message box: typing a long message keeps what you are typing in view (the box scrolls to the end, up to five whole lines)', sc.tall && sc.atBottom && sc.h > 100 && sc.h <= 142);
     await page.fill('#msg', 'half a thought for the first one');
     await backK(); await openK(keys[1]);
     check('drafts: another session starts with an empty box, not the first one\'s words', (await page.inputValue('#msg')) === '');
@@ -955,10 +962,96 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     await tap(page, '.tab[data-view=waiting]'); await page.waitForTimeout(300);
     await tap(page, `.item[data-key="${bl}"]`); await page.waitForSelector('#optrow button', { timeout: 8000 }); await page.waitForTimeout(400);
     check('typing: at a numbered question with no typing row the box says to tap an option', /Tap an option/.test(await page.getAttribute('#msg', 'placeholder')));
-    await page.fill('#msg', 'I should be able to multi select here. I cant do 1 2 3'); await page.click('#send');
-    await page.waitForFunction(() => /numbered pick/.test(document.body.textContent), null, { timeout: 6000 }).catch(() => {});
-    check('typing: words sent at that question are refused with the reason, not typed into it', /numbered pick/.test(await page.textContent('body')) && (await page.$('#sheet:not([hidden]) .go')) === null);
+    const WORDS = 'I should be able to multi select here. I cant do 1 2 3';
+    await page.fill('#msg', WORDS); await page.click('#send');
+    await page.waitForSelector('.skipsheet', { timeout: 6000 }).catch(() => {});
+    check('typing: words sent at that question are not typed into it; a sheet says why and shows them', (await page.$('.skipsheet')) !== null && /A question is waiting/.test(await page.textContent('#sheet')) && (await page.textContent('.skipmsg')) === WORDS && (await page.$('#sheet .btns .go')) !== null);
+    check('typing: what you typed is still in the box and kept as the draft', (await page.inputValue('#msg')) === WORDS && await page.evaluate((w) => Object.values(JSON.parse(localStorage.getItem('shepr.drafts') || '{}')).some((d) => d.t === w), WORDS));
+    await page.click('#sheet .btns button:not(.go)'); await page.waitForTimeout(300);
+    check('typing: "Answer it first" closes the sheet and keeps the words', (await page.$('.skipsheet')) === null && (await page.inputValue('#msg')) === WORDS);
+    await page.click('#send'); await page.waitForSelector('.skipsheet'); await page.click('#sheet .btns .go');
+    await page.waitForFunction(() => /Closes the question/.test(document.getElementById('sheet').textContent), null, { timeout: 6000 }).catch(() => {});
+    const skipPlan = await page.textContent('#sheet');
+    check('typing: skipping shows exactly what will happen first (Esc, then your words as a prompt) and approves nothing', /Closes the question/.test(skipPlan) && /Esc\. Nothing is answered or approved/.test(skipPlan) && /Then sends as a prompt/.test(skipPlan) && skipPlan.includes(WORDS) && (await page.$('#sheet .go.appr')) === null);
+    await page.waitForTimeout(900); await page.click('#sheet .btns .go');
+    await page.waitForFunction(() => /did not close/.test(document.body.textContent), null, { timeout: 14000 }).catch(() => {});
+    check('typing: if the question will not close it says so, nothing was sent, and your words are still there', /did not close/.test(await page.textContent('body')) && (await page.inputValue('#msg')) === WORDS);
+    await page.fill('#msg', Array.from({ length: 12 }, (_, i) => 'line ' + (i + 1) + ' of my message').join('\n')); await page.waitForTimeout(250);
+    const mb = await page.$eval('#msg', (t) => { const cs = getComputedStyle(t), lh = parseFloat(cs.lineHeight), pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom); return { atEnd: t.scrollTop + t.clientHeight >= t.scrollHeight - 1, lines: (t.clientHeight - pad) / lh, scrolls: t.scrollHeight > t.clientHeight }; });
+    check('typing: a long message keeps the line you are typing in full view, in a box of whole lines (no half-cut line at the bottom, five lines at most)', mb.atEnd && mb.scrolls && Math.abs(mb.lines - Math.round(mb.lines)) < 0.06 && mb.lines <= 5.06);
     await page.fill('#msg', ''); await page.click('#dback'); await page.waitForTimeout(300);
+  }
+
+  // ---- Settings: four sections that each fit one screen, the two links at the very bottom, and every choice does something
+  {
+    const sections = ['display', 'alerts', 'phones', 'about'], fits = {};
+    for (const h of [844, 664]) {
+      await page.setViewportSize({ width: 390, height: h }); await page.waitForTimeout(300);
+      await tap(page, '.tab[data-view=settings]'); await page.waitForTimeout(600);
+      for (const seg of sections) {
+        await page.click(`#setseg [data-seg=${seg}]`); await page.waitForTimeout(300);
+        fits[h + seg] = await page.evaluate(() => { const m = document.getElementById('main'), s = document.getElementById('setbody'), f = document.querySelector('.setfoot').getBoundingClientRect();
+          return { fits: s.scrollHeight <= s.clientHeight + 1 && m.scrollHeight <= m.clientHeight + 1, foot: f.bottom <= innerHeight, side: m.scrollWidth - m.clientWidth }; });
+        if (h === 844) await page.screenshot({ path: `${OUT}/s-${seg}.png` });
+      }
+    }
+    console.log('   settings fit:', JSON.stringify(fits));
+    check('settings: every section fits one screen at 390x844 with nothing to scroll and nothing sticking out sideways', sections.every((s) => fits['844' + s].fits && fits['844' + s].foot && fits['844' + s].side === 0));
+    check('settings: and on a short phone, 390x664, too', sections.every((s) => fits['664' + s].fits && fits['664' + s].foot && fits['664' + s].side === 0));
+    await page.click('#setseg [data-seg=about]'); await page.waitForTimeout(300);
+    const links = await page.$$eval('.setfoot a', (a) => a.map((x) => ({ href: x.getAttribute('href'), target: x.target, rel: x.rel, h: x.getBoundingClientRect().height })));
+    check('settings: at the very bottom are two links, nixfred.com and the Shepr repository on GitHub, each a big tap target that opens outside the app',
+      links.length === 2 && links[0].href === 'https://nixfred.com' && links[1].href === 'https://github.com/nixfred/shepr' && links.every((l) => l.target === '_blank' && /noopener/.test(l.rel) && l.h >= 44));
+    check('settings: the links are the last thing on the page, under every section', await page.evaluate(() => { const m = document.getElementById('main'); return m.lastElementChild.classList.contains('setfoot') && m.lastElementChild.getBoundingClientRect().top >= document.getElementById('setbody').getBoundingClientRect().bottom - 1; }));
+    await page.click('#setseg [data-seg=display]'); await page.waitForTimeout(300);
+    const pick = (k, v) => page.click(`.segc[data-pref=${k}] [data-v=${v}]`);
+    const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('shepr.prefs') || '{}'));
+    await pick('motion', 'off'); await page.waitForTimeout(150);
+    check('settings: Animations Off stops every animation at once, and is remembered', await page.evaluate(() => document.documentElement.dataset.motion === 'off' && parseFloat(getComputedStyle(document.querySelector('.tab svg')).transitionDuration) < 0.001) && (await stored()).motion === 'off');
+    await pick('motion', 'on'); await page.waitForTimeout(150);
+    check('settings: Animations On brings them back', await page.evaluate(() => document.documentElement.dataset.motion === 'on' && parseFloat(getComputedStyle(document.querySelector('.tab svg')).transitionDuration) > 0.1));
+    const px = () => page.evaluate(() => ({ tfs: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--tfs')), topx: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--topx')) }));
+    const p0 = await px();
+    await page.click('[data-set=text-size] .segb:last-child'); await page.click('[data-set=top-spacing] .segb:last-child');
+    const p1 = await px(), shown = await page.textContent('[data-set=text-size] .val');
+    check('settings: Text size and Top spacing steps change the page at once and show the new value', p1.tfs === p0.tfs + 1 && p1.topx === p0.topx + 4 && shown === String(p1.tfs));
+    await page.click('[data-set=text-size] .segb:first-child'); await page.click('[data-set=top-spacing] .segb:first-child');
+    let queueCalls = 0; const onReq = (r) => { if (/\/api\/queue/.test(r.url())) queueCalls++; }; page.on('request', onReq);
+    await pick('refresh', 'fast'); await page.waitForTimeout(6500); const fastCalls = queueCalls; queueCalls = 0;
+    await pick('refresh', 'manual'); await page.waitForTimeout(6500); const manualCalls = queueCalls; page.removeListener('request', onReq);
+    console.log('   refresh: fast', fastCalls, 'calls in 6.5 s, manual', manualCalls);
+    check('settings: Refresh really sets the pace: Fast re-reads the queue by itself within 6 seconds, Manual never does', fastCalls >= 1 && manualCalls === 0);
+    check('settings: the Refresh line says what the chosen speed means', /only when you pull down/.test(await page.textContent('[data-set=refresh] .sub')));
+    await pick('refresh', 'normal');
+    check('settings: a damaged or unknown saved choice falls back to the default instead of breaking', await page.evaluate(() => { const P = window.shepr.prefs; localStorage.setItem('shepr.prefs', 'not json'); const a = P.get('refresh'); localStorage.setItem('shepr.prefs', JSON.stringify({ refresh: 'zzz', slash: 5 })); const b = P.get('refresh'), c = P.get('slash'); localStorage.removeItem('shepr.prefs'); return a === 'normal' && b === 'normal' && c === 'show'; }));
+    // Slash commands Hide removes the / button in a session
+    const idle = await page.evaluate(() => { const a = window.shepr.S.q.agents.find((x) => x.status === 'idle'); return a.host + '|' + a.pane; });
+    const slashShown = async () => { await tap(page, '.tab[data-view=waiting]'); await page.waitForTimeout(300); await tap(page, `.item[data-key="${idle}"]`); await page.waitForSelector('#detail:not([hidden])');
+      await page.waitForFunction(() => window.shepr.S.agent, null, { timeout: 8000 }).catch(() => {}); await page.waitForTimeout(500); const v = !(await page.$eval('#slashbtn', (b) => b.hidden)); await page.click('#dback'); await page.waitForTimeout(300); return v; };
+    await pick('slash', 'hide'); const hid = !(await slashShown());
+    await tap(page, '.tab[data-view=settings]'); await page.waitForTimeout(400); await pick('slash', 'show'); const back = await slashShown();
+    check('settings: Slash commands Hide takes the / button away in a session, and Show brings it back', hid && back);
+    // Clear unsent drafts
+    await page.evaluate(() => { window.shepr.drafts.put('gus|wX:p1', 'a draft I never sent'); });
+    await tap(page, '.tab[data-view=settings]'); await page.waitForTimeout(400); await page.click('#setseg [data-seg=about]'); await page.waitForTimeout(300);
+    check('settings: About offers to clear unsent drafts and says how many there are', /Clear unsent drafts \(\d+\)/.test(await page.textContent('#setbody')));
+    await page.click('text=Clear unsent drafts'); await page.waitForTimeout(400);
+    check('settings: clearing them empties the saved drafts and the button goes quiet', (await page.evaluate(() => localStorage.getItem('shepr.drafts'))) === '{}' && await page.$eval('#setbody .btns:last-child button', (b) => b.disabled));
+    // the choices read at launch: Open on, and the splash screen
+    await page.click('#setseg [data-seg=display]'); await page.waitForTimeout(300);
+    await pick('open', 'subs'); await pick('splash', 'off'); await page.reload(); await page.waitForTimeout(150);
+    const rl = await page.evaluate(() => ({ splash: !!document.getElementById('splash'), tab: window.shepr.S.tab }));
+    check('settings: Splash screen Off removes the opening animation, and Open on Subs lands on Subs', rl.splash === false && rl.tab === 'subs');
+    await page.evaluate(() => { window.shepr.prefs.set('splash', 'short'); window.shepr.prefs.set('open', 'last'); localStorage.removeItem('shepr.splash'); });
+    await page.reload(); await page.waitForTimeout(150);
+    check('settings: Splash screen Short plays the quick version', await page.evaluate(() => { const s = document.getElementById('splash'); return !!s && s.classList.contains('quick'); }));
+    await page.evaluate(() => { window.shepr.prefs.set('splash', 'full'); localStorage.removeItem('shepr.splash'); });
+    const tFull = Date.now(); await page.reload(); await page.waitForSelector('#splash', { state: 'detached', timeout: 9000 }); const full = Date.now() - tFull;
+    console.log('   full splash lasted', full, 'ms');
+    check('settings: the full splash is quicker than before: gone within about 5.3 seconds, where it used to hold 5 seconds plus the fade', full >= 3900 && full <= 5300);
+    await page.evaluate(() => { localStorage.removeItem('shepr.prefs'); });
+    await page.waitForFunction(() => window.shepr && window.shepr.S.q, null, { timeout: 15000 });
+    await tap(page, '.tab[data-view=waiting]'); await page.waitForTimeout(500);
   }
 
   // ---- looking around: guidance on Subs, a down host says why, a Codex tag, the age of what you read, and the tail stays at the bottom

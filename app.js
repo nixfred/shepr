@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v38';   // keep equal to sw.js VERSION: shown in Keys and logged by the host, so you can see which app a phone is running
+const BUILD = 'v39';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -52,7 +52,23 @@ const drafts = {
   },
   has(k) { return !!this.get(k); },
 };
-const REDUCED = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+// ---- Settings: small choices kept on this phone (localStorage), each one wired to something real. See Settings > Display.
+const PREFS = {
+  splash:  { def: 'full',   opts: [['full', 'Full'], ['short', 'Short'], ['off', 'Off']] },
+  motion:  { def: 'on',     opts: [['on', 'On'], ['off', 'Off']] },
+  open:    { def: 'last',   opts: [['last', 'Last'], ['waiting', 'Queue'], ['all', 'Radar'], ['subs', 'Subs']] },
+  refresh: { def: 'normal', opts: [['fast', 'Fast'], ['normal', 'Normal'], ['slow', 'Slow'], ['manual', 'Manual']] },
+  slash:   { def: 'show',   opts: [['show', 'Show'], ['hide', 'Hide']] },
+};
+const REFRESH_MS = { fast: [5000, 3000], normal: [10000, 6000], slow: [30000, 15000], manual: [0, 0] };   // [the queue, the open session]
+const prefs = {
+  get(k) { const all = store.get('shepr.prefs', {}), v = all && typeof all === 'object' ? all[k] : undefined; return PREFS[k].opts.some((o) => o[0] === v) ? v : PREFS[k].def; },
+  set(k, v) { const all = store.get('shepr.prefs', {}); store.set('shepr.prefs', Object.assign({}, all && typeof all === 'object' ? all : {}, { [k]: v })); },
+};
+const osReduced = () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+let REDUCED = osReduced() || prefs.get('motion') === 'off';   // the iPhone's own Reduce Motion, or Settings > Animations off
+function applyMotion() { document.documentElement.dataset.motion = prefs.get('motion'); }
+applyMotion();
 const clock = (sec) => new Date(sec * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 const keyOf = (a) => a.host + '|' + a.pane;
 // What a session is CALLED everywhere: the name Fred gave its herdr workspace (the sidebar name, "Shepr"), or its
@@ -108,6 +124,8 @@ const S = {
   shown: new Set(),   // rows already animated in, so a poll does not replay the entrance
 };
 if (S.tab === 'go') S.tab = 'waiting';
+if (S.tab === 'keys') S.tab = 'settings';   // the Keys tab is now Settings
+if (prefs.get('open') !== 'last') S.tab = prefs.get('open');   // Settings > Open on
 
 // ---------------------------------------------------------------------------
 // 2. The device key. ECDSA P-256, generated non-extractable: the phone can sign with it and
@@ -338,11 +356,11 @@ const ICON = {
   all: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.8"/><path d="M12 12 18.4 5.6"/><circle cx="16.2" cy="15.4" r="1.1" fill="currentColor" stroke="none"/>',
   subs: '<path d="M3.5 17a8.5 8.5 0 0 1 17 0"/><path d="m12 17 4.2-5.4"/><circle cx="12" cy="17" r="1.3" fill="currentColor" stroke="none"/><path d="M6.2 12.6l1 .7M17.8 12.6l-1 .7M12 8.5v1.2"/>',
   hosts: '<rect x="3.5" y="4" width="17" height="6.5" rx="2"/><rect x="3.5" y="13.5" width="17" height="6.5" rx="2"/><path d="M7 7.25h.01M7 16.75h.01"/>',
-  keys: '<circle cx="8" cy="15.5" r="4"/><path d="m10.9 12.6 8.1-8.1M16 7.5l2.5 2.5M13.4 10.1l1.6 1.6"/>',
+  settings: '<path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17" r="2"/>',
 };
 const TABS = [
   { id: 'waiting', label: 'Queue' }, { id: 'all', label: 'Radar' }, { id: 'subs', label: 'Subs' },
-  { id: 'hosts', label: 'Hosts' }, { id: 'keys', label: 'Keys' },
+  { id: 'hosts', label: 'Hosts' }, { id: 'settings', label: 'Settings' },
 ];
 function buildTabs() {
   const nav = $('tabs');
@@ -360,7 +378,7 @@ function buildTabs() {
     gesture(b, {
       instant: true,
       tap: () => (t.action ? openGoTo('') : switchTab(t.id)),
-      dbl: () => { $('main').scrollTop = 0; fetchQueue(true); if (S.tab === 'hosts' || S.tab === 'keys') loadHosts(); },
+      dbl: () => { $('main').scrollTop = 0; fetchQueue(true); if (S.tab === 'hosts' || S.tab === 'settings') loadHosts(); },
       long: () => openGoTo(''),
     });
     nav.append(b);
@@ -372,7 +390,7 @@ function switchTab(id) {
   const b = document.querySelector('.tab[data-view="' + id + '"]');
   if (b) { b.classList.remove('bump'); void b.offsetWidth; b.classList.add('bump'); }
   render();
-  if (id === 'hosts' || id === 'keys') loadHosts();
+  if (id === 'hosts' || id === 'settings') loadHosts();
 }
 function paintTabs() {
   let i = 0;
@@ -498,6 +516,7 @@ function paintMain() {
   const keep = m.scrollTop;
   m.textContent = '';
   m.classList.toggle('radarpage', S.tab === 'all');   // the radar page is one fixed screen: the numbers on top, the radar filling the rest
+  m.classList.toggle('setpage', S.tab === 'settings');   // Settings is one fixed screen too: four sections behind a bar, each fitting without scrolling
   if (S.tab !== 'subs') BUD.fresh = true;   // the Subs page animates in each time you arrive, not on every refresh
   if (S.tab === 'waiting') {
     const w = waiting(), d = finished(), ds = finishedSeen(), sl = sleeping(), wk = working();
@@ -542,12 +561,12 @@ function paintMain() {
   } else if (S.tab === 'hosts') {
     paintHostsView(m);
   } else {
-    paintKeysView(m);
+    paintSettingsView(m);
   }
   m.scrollTop = keep;
 }
 
-$('refresh').addEventListener('click', () => { fetchQueue(true); if (S.tab === 'hosts' || S.tab === 'keys') loadHosts(); });
+$('refresh').addEventListener('click', () => { fetchQueue(true); if (S.tab === 'hosts' || S.tab === 'settings') loadHosts(); });
 
 // Pull down from the top of any list to refresh. Reads only: it never writes, and it never navigates.
 (function pullToRefresh() {
@@ -576,7 +595,7 @@ $('refresh').addEventListener('click', () => { fetchQueue(true); if (S.tab === '
     const go = pull >= LIMIT; y0 = null;
     if (!go) { paint(0); return; }
     paint(LIMIT, true);
-    Promise.all([fetchQueue(true), (S.tab === 'hosts' || S.tab === 'keys') ? loadHosts() : null]).finally(() => setTimeout(() => paint(0), 400));
+    Promise.all([fetchQueue(true), (S.tab === 'hosts' || S.tab === 'settings') ? loadHosts() : null]).finally(() => setTimeout(() => paint(0), 400));
   };
   m.addEventListener('touchend', end, { passive: true });
   m.addEventListener('touchcancel', () => { y0 = null; paint(0); }, { passive: true });
@@ -872,7 +891,7 @@ const keyBytes = (b64) => { const s = atob(b64.replace(/-/g, '+').replace(/_/g, 
 function loadPush() {
   if (S.pushLoading) return Promise.resolve();
   S.pushLoading = true;
-  return api('api/push/config').then((c) => { S.push = c; if (S.tab === 'keys') paintMain(); }).catch(() => { /* the banner says what is wrong */ })
+  return api('api/push/config').then((c) => { S.push = c; if (S.tab === 'settings') paintMain(); }).catch(() => { /* the banner says what is wrong */ })
     .finally(() => { S.pushLoading = false; });
 }
 async function pushOn() {
@@ -938,9 +957,9 @@ function loadHosts() {
   clearTimeout(hostsTimer);
   return api('api/hosts').then((h) => {
     S.hosts = h;
-    if (S.tab === 'hosts' || S.tab === 'keys') paintMain();
+    if (S.tab === 'hosts' || S.tab === 'settings') paintMain();
     // Keep watching a running scan, but only while you are looking at it, and only ever one timer.
-    if (h.scan && h.scan.running && (S.tab === 'hosts' || S.tab === 'keys')) hostsTimer = setTimeout(loadHosts, 1500);
+    if (h.scan && h.scan.running && (S.tab === 'hosts' || S.tab === 'settings')) hostsTimer = setTimeout(loadHosts, 1500);
   }).catch(() => { /* the banner already says what is wrong */ })
     .finally(() => { hostsBusy = false; });
 }
@@ -1025,52 +1044,105 @@ function startScan() {
     .catch((e) => notify(e.message, true));
 }
 
-function paintKeysView(m) {
+// ---- Settings: four sections behind a bar so each one fits a screen (Law 17: the page never scrolls). Display is a set of
+// choices kept on this phone; Alerts and Phones are the host's lists; About holds the build, and the two links sit at the bottom.
+const SET_SEGS = [['display', 'Display'], ['alerts', 'Alerts'], ['phones', 'Phones'], ['about', 'About']];
+let setSeg = store.get('shepr.setseg', 'display');
+const REFRESH_NOTE = { fast: 'queue every 5 s, an open session every 3 s', normal: 'queue every 10 s, an open session every 6 s', slow: 'queue every 30 s, an open session every 15 s',
+                       manual: 'only when you pull down, tap refresh, or come back to the app' };
+function setRow(label, hint, ctl) {
+  const r = el('div', 'setrow'); r.dataset.set = label.toLowerCase().replace(/[^a-z]+/g, '-');
+  r.append(el('div', 'ttl', label), ctl);
+  if (hint != null) { r._hint = el('div', 'sub', hint); r.append(r._hint); }
+  return r;
+}
+function setChoice(key, after) {   // a row of choices from PREFS, the chosen one lit
+  const c = el('div', 'segc'); c.dataset.pref = key;
+  PREFS[key].opts.forEach(([v, text]) => {
+    const b = btn(text, 'segb' + (prefs.get(key) === v ? ' on' : ''), () => {
+      prefs.set(key, v);
+      c.querySelectorAll('.segb').forEach((x) => x.classList.toggle('on', x === b));
+      if (after) after(v);
+    });
+    b.dataset.v = v; c.append(b);
+  });
+  return c;
+}
+function setStep(bump, text) {   // a minus, the value, a plus
+  const c = el('div', 'stepc'), val = el('span', 'val', text());
+  const go = (d) => () => { bump(d); val.textContent = text(); };
+  c.append(btn('−', 'segb', go(-1)), val, btn('+', 'segb', go(1)));
+  return c;
+}
+function setDisplay(b) {
+  const refresh = setRow('Refresh', REFRESH_NOTE[prefs.get('refresh')], el('div'));
+  refresh.replaceChild(setChoice('refresh', (v) => { refresh._hint.textContent = REFRESH_NOTE[v]; startPolls(); }), refresh.children[1]);
+  b.append(
+    setRow('Text size', null, setStep((d) => bumpTfs(d), () => String(tfs))),
+    setRow('Splash screen', null, setChoice('splash')),
+    setRow('Animations', null, setChoice('motion', () => { REDUCED = osReduced() || prefs.get('motion') === 'off'; applyMotion(); })),
+    setRow('Open on', null, setChoice('open')),
+    refresh,
+    setRow('Slash commands', null, setChoice('slash', () => paintSlash())),
+    setRow('Top spacing', 'The phone reports ' + reportedInset() + 'px at the top', setStep((d) => { topx = Math.max(0, Math.min(80, topx + d * 4)); applyTopx(true); }, () => topx + 'px')),
+  );
+}
+function setPhones(b) {
   const H = S.hosts, q = S.q;
-  m.append(notifyCard());
   const me = el('div', 'card');
-  me.append(el('h2', null, 'This phone'));
-  me.append(el('p', null, (S.dev ? S.dev.name : '?') + ' is paired with ' + ((q && q.host) || (S.hello && S.hello.name) || 'the host') + '.'));
+  me.append(el('h2', null, 'This phone'),
+            el('p', null, (S.dev ? S.dev.name : '?') + ' is paired with ' + ((q && q.host) || (S.hello && S.hello.name) || 'the host') + '.'));
   const mine = H && H.devices.find((d) => d.you);
   if (mine) me.append(el('div', 'code selectable', mine.fp));
-  me.append(el('p', 'dim', 'The private key stays in this app, cannot be exported, and signs every request.'
-    + (standalone ? '' : ' Add Shepr to the Home Screen so iOS keeps it.')));
-  m.append(me);
-
+  b.append(me);
   if (H) {
-    m.append(section('Phones the host trusts', H.devices.length));
-    const box = el('div', 'devbox');
+    b.append(section('Phones the host trusts', H.devices.length));
+    const box = el('div', 'devbox');   // the one list here: it takes the spare room and scrolls in place
     H.devices.forEach((d) => {
       const r = el('div', 'hrow'); const mm = el('div', 'meta');
       mm.append(el('div', 'ttl', d.name + (d.you ? ' (this phone)' : '')),
-                el('div', 'sub', d.fp.slice(0, 20) + '\u2026 \u00b7 seen ' + (d.last_seen ? clock(d.last_seen) : 'never')));
+                el('div', 'sub', d.fp.slice(0, 20) + '… · seen ' + (d.last_seen ? clock(d.last_seen) : 'never')));
       r.append(mm);
       if (H.writes) r.append(btn('Revoke', 'mini-btn bad', () => prepare({ kind: 'device_revoke', id: d.id })));
       box.append(r);
     });
-    m.append(box);
+    b.append(box);
+    const more = () => box.classList.toggle('more', box.scrollTop + box.clientHeight < box.scrollHeight - 2);   // a soft fade at the bottom says there is more to scroll to
+    box.addEventListener('scroll', more); requestAnimationFrame(more);
   }
-
-  const add = el('div', 'card');
-  add.append(el('h2', null, 'Pair another phone'));
-  const cmd = el('div', 'code selectable', 'shepr pair');
-  add.append(el('p', 'dim', 'Run this on the host, then tap Scan on the new phone:'), cmd);
-  m.append(add);
-
-  const tp = el('div', 'card');
-  tp.append(el('h2', null, 'Top spacing'));
-  const trow = el('div', 'hrow'); trow.style.cssText = 'padding:0;background:none;border:0';
-  const tm = el('div', 'meta'); tm.append(el('div', 'sub', 'Phone reports ' + reportedInset() + 'px at the top. Extra: ' + topx + 'px.'));
-  const redraw = () => { tm.firstChild.textContent = 'Phone reports ' + reportedInset() + 'px at the top. Extra: ' + topx + 'px.'; };
-  trow.append(tm, btn('\u2212', 'mini-btn', () => { topx = Math.max(0, topx - 4); applyTopx(true); redraw(); }),
-              btn('+', 'mini-btn', () => { topx = Math.min(80, topx + 4); applyTopx(true); redraw(); }));
-  tp.append(trow); m.append(tp);
-
-  const row = el('div', 'btns');
-  row.append(btn('How to move around', '', openHelp), btn('Forget this phone\u2026', 'bad', forgetThisPhone));
-  m.append(row);
-  m.append(el('p', 'dim fine', (q && q.writes ? 'Sends always preview first; Shepr never approves anything by itself.' : 'Read-only host.')
-    + ' Shepr ' + BUILD + '. Blocked time is watched every ' + ((q && q.poll_s) || 15) + 's; \u2265 means it was already blocked when watching began.'));
+  const add = el('div', 'hrow'), am = el('div', 'meta');
+  am.append(el('div', 'ttl', 'Pair another phone'), el('div', 'sub', 'On the host run: shepr pair, then tap Scan'));
+  add.append(am); b.append(add);
+  const row = el('div', 'btns'); row.append(btn('Forget this phone…', 'bad', forgetThisPhone)); b.append(row);
+}
+function setAbout(b) {
+  const q = S.q, n = Object.keys(drafts.all()).length;
+  const c = el('div', 'card');
+  c.append(el('h2', null, 'Shepr ' + BUILD),
+           el('p', null, 'Host ' + ((q && q.host) || (S.hello && S.hello.name) || '?') + (q && q.server_build ? ' runs ' + q.server_build : '')
+             + (q && q.writes ? '. Sends always preview first; Shepr never approves anything by itself.' : '. Read-only host.')),
+           el('p', 'dim', 'The private key stays in this app and signs every request.' + (standalone ? '' : ' Add Shepr to the Home Screen so iOS keeps it.')),
+           el('p', 'dim', 'Blocked time is watched every ' + ((q && q.poll_s) || 15) + ' s; ≥ means it was already blocked when watching began.'));
+  b.append(c);
+  const r1 = el('div', 'btns'); r1.append(btn('Gestures', '', openHelp), btn('Reload Shepr', '', () => location.reload()));
+  const clr = btn('Clear unsent drafts' + (n ? ' (' + n + ')' : ''), '', () => { store.set('shepr.drafts', {}); notify('Unsent drafts cleared.', false); paintMain(); });
+  clr.disabled = !n;
+  const r2 = el('div', 'btns'); r2.append(clr);
+  b.append(r1, r2);
+}
+function settingsFoot() {   // the two links, always at the very bottom of Settings
+  const f = el('div', 'setfoot');
+  const link = (href, text) => { const a = el('a', null, text); a.href = href; a.target = '_blank'; a.rel = 'noopener noreferrer'; return a; };
+  f.append(link('https://nixfred.com', 'nixfred.com'), link('https://github.com/nixfred/shepr', 'Shepr on GitHub'));
+  return f;
+}
+function paintSettingsView(m) {
+  const seg = SET_SEGS.some((x) => x[0] === setSeg) ? setSeg : 'display';
+  const bar = el('div', 'setseg'); bar.id = 'setseg';
+  SET_SEGS.forEach(([id, text]) => { const bt = btn(text, 'mini-btn' + (id === seg ? ' on' : ''), () => { setSeg = id; store.set('shepr.setseg', id); paintMain(); }); bt.dataset.seg = id; bar.append(bt); });
+  const body = el('div', 'setbody'); body.id = 'setbody';
+  ({ display: setDisplay, alerts: (x) => x.append(notifyCard()), phones: setPhones, about: setAbout })[seg](body);
+  m.append(bar, body, settingsFoot());
 }
 
 function openHelp() {
@@ -1366,7 +1438,23 @@ function prepare(body) {
   if (!isHost && !S.cur) return;
   const b = isHost ? body : Object.assign({ host: S.cur.host, pane: S.cur.pane }, body);
   post('api/send/prepare', b).then((p) => { p.kind = p.kind || body.kind; showPlan(p); })
-    .catch((e) => notify(e.message, true));
+    .catch((e) => {
+      // Words a numbered question would read as keystrokes can never be typed into it. Do not just refuse: keep them, and offer the way forward.
+      if (body.kind === 'text' && !body.skip && SKIPPABLE.indexOf(e.code) >= 0) { openSkipSheet(body.text); return; }
+      notify(e.message, true);
+    });
+}
+const SKIPPABLE = ['menu_text', 'blocked_text'];
+function openSkipSheet(text) {
+  const box = el('div', 'skipsheet');
+  box.append(el('h3', null, 'A question is waiting'),
+             el('div', 'sub', 'Your words cannot be typed into it: a numbered question reads typed characters as keystrokes. Your message stays in the box either way.'));
+  const quote = el('div', 'skipmsg selectable'); quote.textContent = text;   // your own words, as text
+  box.append(quote, el('div', 'sub', 'Or skip the question. Shepr presses Esc to close it without answering anything, then sends your message as a normal prompt. You review it first.'));
+  const row = el('div', 'btns');
+  row.append(btn('Answer it first', '', closeSheet), btn('Skip and send\u2026', 'go', () => { closeSheet(); prepare({ kind: 'text', text, skip: true }); }));
+  box.append(row);
+  openSheet(box);
 }
 
 // ---------------------------------------------------------------------------
@@ -1536,6 +1624,7 @@ function applyTfs() { document.documentElement.style.setProperty('--tfs', tfs + 
 applyTfs();
 $('fsm').addEventListener('click', () => { tfs = Math.max(13, tfs - 1); applyTfs(); });
 $('fsp').addEventListener('click', () => { tfs = Math.min(28, tfs + 1); applyTfs(); });
+function bumpTfs(d) { tfs = Math.max(13, Math.min(28, tfs + d)); applyTfs(); }   // Settings > Text size
 
 // ---------------------------------------------------------------------------
 // Terminal text, made readable on a phone. A terminal is 100+ columns of fixed-width cells, so at phone width the
@@ -1675,7 +1764,7 @@ function loadTail(force) {
     })
     .finally(() => { tailBusy = false; });
 }
-setInterval(() => { if (S.cur && !S.sheetOpen && !document.hidden) loadTail(); }, 6000);
+// (an open session's refresh is started together with the queue's: startPolls, at the end of the file)
 
 // ---- the whole session, one scroll. The live text stays at the bottom exactly as before; ABOVE it sits the entire
 // conversation. herdr keeps ~1,000 lines, the Claude transcript keeps everything, so the host serves it a page at a time
@@ -1838,7 +1927,7 @@ function paintDock() {
   q.hidden = !(S.queued && S.agent && S.agent.agent === 'claude' && S.q && S.q.writes);
   if (!q.hidden) q.append(el('span', 'qtxt', 'A message is queued behind the current work.'), btn('Send now', 'qgo', () => prepare({ kind: 'sendnow' })));
   // Short on purpose: the box is narrow now (the / button), and a placeholder that wraps makes the box grow.
-  const ph = st === 'blocked' ? (m && m.options.length ? (m.options.some((o) => o.free) ? 'Your own answer (goes in the \u270e row)' : 'Tap an option above') : 'Answer, sent with \u23ce')
+  const ph = st === 'blocked' ? (m && m.options.length ? (m.options.some((o) => o.free) ? 'Your own answer (goes in the \u270e row)' : 'Tap an option, or write to skip it') : 'Answer, sent with \u23ce')
            : st === 'working' ? 'Queue a message'
            : 'Message ' + (S.agent ? S.agent.agent : '');
   $('msg').placeholder = ph;
@@ -1934,11 +2023,13 @@ function attThumb(it) {
 function openAttachSheet() {
   const box = el('div', 'attsheet'), n = ATT.items.length;
   box.append(el('h3', null, n === 1 ? 'Attach 1 photo' : 'Attach ' + n + ' photos'), el('div', 'sub', 'Add a comment to each if you like. They go into the message box; nothing is sent until you press Send.'));
-  const list = el('div', 'at-list');
+  const list = el('div', 'at-list'), grows = [], cap = n === 1 ? 6 : 4;   // a lone photo gets a taller box
   ATT.items.forEach((it, i) => {
-    const row = el('div', 'at-row'), ci = el('input', 'at-c'), rm = btn('×', 'at-x', () => { ATT.items.splice(i, 1); if (!ATT.items.length) { closeSheet(); return; } openAttachSheet(); });
-    ci.type = 'text'; ci.maxLength = 300; ci.placeholder = 'Comment on this photo'; ci.value = it.comment; ci.autocomplete = 'off'; ci.enterKeyHint = 'done';
-    ci.addEventListener('input', () => { it.comment = ci.value; });
+    const row = el('div', 'at-row'), ci = el('textarea', 'at-c'), rm = btn('×', 'at-x', () => { ATT.items.splice(i, 1); if (!ATT.items.length) { closeSheet(); return; } openAttachSheet(); });
+    ci.rows = 1; ci.maxLength = 300; ci.placeholder = 'Comment on this photo'; ci.value = it.comment; ci.autocomplete = 'off'; ci.enterKeyHint = 'done';
+    ci.addEventListener('input', () => { it.comment = ci.value; fitBox(ci, cap); });   // grows to show everything you type, up to four lines
+    ci.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); ci.blur(); } });   // one paragraph per photo; Done closes the keyboard
+    grows.push(ci);
     rm.setAttribute('aria-label', 'Remove ' + attName(it.file)); rm.disabled = ATT.busy;
     const mid = el('span', 'at-mid'); mid.append(el('span', 'at-n', (n > 1 ? (i + 1) + '. ' : '') + attName(it.file) + (it.path ? '  ✓' : '')), ci);
     row.append(attThumb(it), mid, rm); list.append(row);
@@ -1949,6 +2040,7 @@ function openAttachSheet() {
   const row = el('div', 'btns'); row.append(btn('Cancel', '', () => { ATT.items = []; closeSheet(); }), go);
   box.append(list, more, status, row);
   openSheet(box);
+  grows.forEach((t) => fitBox(t, cap)); setTimeout(() => grows.forEach((t) => fitBox(t, cap)), 90);   // once it is on screen to measure, and again after it has slid up
 }
 // Shrink and upload each file in turn, then write the paths and comments into that session's message box.
 async function attachAll(go, status) {
@@ -1997,12 +2089,18 @@ function paintStage() {
   st.append(lab, clear, send);
 }
 
-function autosize() {
-  // Collapsing to "auto" to measure resets the scroll on iOS, which left the top of a long message in view while you typed at the end.
-  const t = $('msg'), keep = t.scrollTop, atEnd = t.selectionStart === t.value.length;
-  t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 132) + 'px';
+// Grow a text box to what is typed, up to maxLines WHOLE lines. A box that ends part-way through a line is how you lose sight of what you
+// are typing. Collapsing to "auto" to measure resets the scroll on iOS, so the position is put back (or kept at the end while you type there).
+function fitBox(t, maxLines) {
+  const cs = getComputedStyle(t), lh = parseFloat(cs.lineHeight) || 22;
+  const padV = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom), edge = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+  const keep = t.scrollTop, atEnd = t.selectionStart === t.value.length;
+  t.style.height = 'auto';
+  const lines = Math.max(1, Math.min(maxLines, Math.round((t.scrollHeight - padV) / lh)));
+  t.style.height = Math.ceil(lines * lh + padV + edge) + 'px';
   t.scrollTop = atEnd ? t.scrollHeight : keep;
 }
+function autosize() { fitBox($('msg'), 5); }
 $('msg').addEventListener('input', autosize);
 $('msg').addEventListener('input', () => { if (S.cur) drafts.put(S.cur.host + '|' + S.cur.pane, $('msg').value); });
 $('compose').addEventListener('submit', (e) => {
@@ -2043,7 +2141,7 @@ function paintSlash() {
   const row = $('slashrow'), btn_ = $('slashbtn');
   const st = S.agent ? S.agent.status : null;
   // A session sitting at a dialog takes typed text INTO the dialog: a slash command makes no sense there.
-  const allowed = !!S.cur && !!S.agent && st !== 'blocked';
+  const allowed = !!S.cur && !!S.agent && st !== 'blocked' && prefs.get('slash') === 'show';   // Settings > Slash commands
   btn_.hidden = !allowed;
   const v = $('msg').value;
   const typing = /^\/\S*$/.test(v);
@@ -2275,14 +2373,16 @@ if (window.visualViewport) {
 const splash = $('splash');
 const t0 = performance.now();
 const lastSplash = store.get('shepr.splash', 0);
-const quick = REDUCED || Date.now() - lastSplash < 20 * 60 * 1000;   // seen it recently: keep it short
+const splashPref = prefs.get('splash');   // Settings > Splash screen: Full, Short or Off
+const quick = splashPref === 'short' || REDUCED || Date.now() - lastSplash < 20 * 60 * 1000;   // seen it recently: keep it short
 if (quick) splash.classList.add('quick');
 store.set('shepr.splash', Date.now());
 const sver = $('sver'); if (sver) sver.textContent = BUILD;
 let splashGone = false;
+if (splashPref === 'off') { splashGone = true; splash.remove(); }
 function hideSplash(force) {
   if (splashGone) return;
-  const min = force ? 0 : quick ? 650 : 5000;
+  const min = force ? 0 : quick ? 650 : 4000;   // the full one finishes typing its tagline at about 3.1 s: hold a little past that, not long
   const wait = Math.max(0, min - (performance.now() - t0));
   splashGone = true;
   setTimeout(() => { splash.classList.add('out'); setTimeout(() => splash.remove(), 600); }, wait);
@@ -2290,7 +2390,14 @@ function hideSplash(force) {
 splash.addEventListener('pointerdown', () => { splashGone = false; hideSplash(true); });
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden && S.dev) { checkNet(); fetchQueue(true); loadTail(); } });
-setInterval(() => { if (!document.hidden && !S.sheetOpen && S.dev && $('pair').hidden) fetchQueue(false); }, 10000);
+let queueTimer = null, tailTimer = null;
+function startPolls() {   // Settings > Refresh sets how often the queue and an open session are re-read
+  clearInterval(queueTimer); clearInterval(tailTimer);
+  const [qms, tms] = REFRESH_MS[prefs.get('refresh')];
+  if (qms) queueTimer = setInterval(() => { if (!document.hidden && !S.sheetOpen && S.dev && $('pair').hidden) fetchQueue(false); }, qms);
+  if (tms) tailTimer = setInterval(() => { if (S.cur && !S.sheetOpen && !document.hidden) loadTail(); }, tms);
+}
+startPolls();
 
 async function boot() {
   buildTabs();
@@ -2312,4 +2419,4 @@ async function boot() {
   hideSplash(false);
 }
 boot();
-window.shepr = { S, ping, standalone, signHeaders, renderBlocks, appIsStale, BUILD, liveCut, syncHistory, prepareUpload, loadLedger, fmtDur, paceLive, budgetVerdict, drafts, currentModel, seenStore, isSeen, finished, finishedSeen, paintMain, paintHostbar, budgetGuidance, hostRow, paintTailAge, subCard };
+window.shepr = { S, ping, standalone, signHeaders, renderBlocks, appIsStale, BUILD, liveCut, syncHistory, prepareUpload, loadLedger, fmtDur, paceLive, budgetVerdict, drafts, prefs, PREFS, currentModel, seenStore, isSeen, finished, finishedSeen, paintMain, paintHostbar, budgetGuidance, hostRow, paintTailAge, subCard };

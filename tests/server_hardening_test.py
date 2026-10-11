@@ -381,4 +381,57 @@ check("gone session: a bad request stays 400, a dead herdr stays 502, an unknown
       srv.http_status("bad_pane") == 400 and srv.http_status("timeout") == 502 and srv.http_status("bad_host") == 404
       and srv.http_status("unpaired") == 401)
 
+# ---- a question that cannot take words: the person may skip it. Esc closes it WITHOUT answering, the words follow as a prompt.
+NUMQ = """Do you want to proceed?
+
+❯ 1. Yes
+  2. Yes, and do not ask again
+  3. No
+
+Esc to cancel"""
+srv.READONLY = False
+srv.need_host = lambda h: {"id": "gus", "machine": None, "kind": "local", "enabled": True}
+state = {"status": "blocked"}
+STUB = lambda host, pane: {"agent_status": state["status"], "state_change_seq": 9, "agent_session": {"value": "s9"}, "cwd": "/tmp/x"}
+srv.get_agent = STUB
+srv.read_tail = lambda host, pane, lines, max_bytes=None: NUMQ
+check("skip: words at a numbered question are still refused as they are, with their own code", refused({"kind": "text", "text": "hello"}) == "menu_text")
+check("skip: several lines at a dialog are refused with their own code", refused({"kind": "text", "text": "a\nb"}) == "blocked_text")
+ps = srv.build_plan({"host": "gus", "pane": "w1:p1", "kind": "text", "text": "line one\nline two", "skip": True})
+sk = srv.PLANS[ps["nonce"]]["steps"]
+check("skip: the plan is Esc, wait for the question to close, then the words as a prompt (several lines are fine), and approves nothing",
+      [s["op"] for s in sk] == ["keys", "await_clear", "prompt"] and sk[0]["keys"] == ["esc"] and sk[2]["text"] == "line one\nline two"
+      and ps["approves"] is False and any(l["k"] == "Closes the question" and "Nothing is answered or approved" in l["v"] for l in ps["lines"]))
+state["status"] = "working"
+pw = srv.build_plan({"host": "gus", "pane": "w1:p1", "kind": "text", "text": "hello", "skip": True})
+check("skip: on an agent that is not blocked the flag does nothing, so Esc can never interrupt its work", [s["op"] for s in srv.PLANS[pw["nonce"]]["steps"]] == ["prompt"])
+state["status"] = "blocked"
+srv.AWAIT_CLEAR_S = 0.8
+flip = {"n": 0}
+def closing(host, pane):
+    flip["n"] += 1
+    return {"agent_status": "blocked" if flip["n"] < 3 else "idle"}
+srv.get_agent = closing
+check("skip: the wait ends the moment the question has closed", REAL_RUN_STEP({"machine": None}, "w1:p1", {"op": "await_clear"}) is None and flip["n"] == 3)
+srv.get_agent = lambda host, pane: {"agent_status": "blocked"}
+try: REAL_RUN_STEP({"machine": None}, "w1:p1", {"op": "await_clear"}); stuck = None
+except srv.HerdrError as e: stuck = e.code
+check("skip: if the question never closes it says so", stuck == "still_blocked")
+srv.get_agent = STUB
+order, never_closes = [], [False]
+def rec(host, pane, step):
+    order.append(step["op"])
+    if step["op"] == "await_clear" and never_closes[0]:
+        raise srv.HerdrError("still_blocked", "the question did not close, so your words were not sent")
+srv.run_step = rec
+def commit_skip():
+    order.clear(); pl = srv.build_plan({"host": "gus", "pane": "w1:p1", "kind": "text", "text": "mine", "skip": True})
+    srv.PLANS[pl["nonce"]]["made"] = time.time(); srv.LAST_SENT.clear()
+    try: srv.commit_plan(pl["nonce"]); return None
+    except srv.HerdrError as e: return e.code
+err_ok = commit_skip(); order_ok = list(order)
+never_closes[0] = True; err_stuck = commit_skip(); order_stuck = list(order)
+check("skip: committed in order, Esc then the wait then the words", err_ok is None and order_ok == ["keys", "await_clear", "prompt"])
+check("skip: when the question will not close, the words are never sent", err_stuck == "still_blocked" and order_stuck == ["keys", "await_clear"])
+
 sys.exit(0 if ok else 1)
