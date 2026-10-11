@@ -2455,10 +2455,57 @@ class Handler(SimpleHTTPRequestHandler):
 # --------------------------------------------------------------------------------------------
 # command line: `shepr pair | devices | revoke`, and (default) serve
 # --------------------------------------------------------------------------------------------
+def _service_runs(text, me):
+    """True when a unit file starts this file. The path may be a symlink and need not be named server.py."""
+    if me in text:
+        return True
+    for token in text.split():
+        if not (token.startswith("/") or token.startswith("~")):
+            continue
+        try:
+            if os.path.realpath(os.path.expanduser(token)) == me:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def unit_hint():
+    """How to start the server on this machine.
+
+    A user unit counts only when it runs this server.py. nixweb names its unit after the session
+    directory. The README writes shepr.service. With neither installed, both names are examples.
+    """
+    me = os.path.realpath(__file__)
+    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd", "user")
+    names = []
+    try:
+        entries = sorted(os.listdir(unit_dir))
+    except OSError:
+        entries = []
+    for name in entries:
+        if not name.endswith(".service"):
+            continue
+        path = os.path.join(unit_dir, name)
+        try:
+            with open(path, errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if _service_runs(text, me):
+            names.append(name[:-len(".service")])
+    if len(names) == 1:
+        return f"systemctl --user start {names[0]}"
+    if names:
+        return " or ".join(f"systemctl --user start {n}" for n in names)
+    return ("the unit you installed (the README writes shepr.service; "
+            "nixweb names its unit nixweb-<session>)")
+
+
 def cli_pair(a):
     info = server_info()
     if not info:
-        sys.exit("shepr: the server is not running here. Start it first: systemctl --user start nixweb-herder.remote.iphone")
+        sys.exit("shepr: the server is not running here. Start it first: " + unit_hint())
     code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(12))
     shown = "-".join(code[i:i + 4] for i in range(0, 12, 4))
     ttl = max(30, min(900, a.ttl))
