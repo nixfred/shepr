@@ -41,6 +41,10 @@ case "${1:-}" in
   queued) for w in $(H workspace list | python3 -c 'import json,sys;[print(w["workspace_id"]) for w in json.load(sys.stdin)["result"]["workspaces"] if w["label"]=="queued"]'); do H workspace close "$w" >/dev/null; done
     HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     mk queued "$HOME/Projects/whats-next" working claude "A long task with a message queued" "$HERE/sample-queued.txt" ;;
+  gone) for w in $(H workspace list | python3 -c 'import json,sys;[print(w["workspace_id"]) for w in json.load(sys.stdin)["result"]["workspaces"] if w["label"]=="gone"]'); do H workspace close "$w" >/dev/null; done
+    HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    mk gone "$HOME/Projects/whats-next" working claude "A session that is about to vanish" "$HERE/sample-pane.txt" ;;
+  gone-rm) for w in $(H workspace list | python3 -c 'import json,sys;[print(w["workspace_id"]) for w in json.load(sys.stdin)["result"]["workspaces"] if w["label"]=="gone"]'); do H workspace close "$w" >/dev/null; done ;;
   queued-rm) for w in $(H workspace list | python3 -c 'import json,sys;[print(w["workspace_id"]) for w in json.load(sys.stdin)["result"]["workspaces"] if w["label"]=="queued"]'); do H workspace close "$w" >/dev/null; done ;;
   asleep) mkdir -p /tmp/shepr-dormant /tmp/shepr-busy
     for w in $(H workspace list | python3 -c 'import json,sys;[print(w["workspace_id"]) for w in json.load(sys.stdin)["result"]["workspaces"] if w["label"] in ("dormant","busy")]'); do H workspace close "$w" >/dev/null; done

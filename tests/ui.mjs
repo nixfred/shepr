@@ -933,6 +933,22 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     execFileSync('bash', [fsh, 'queued-rm'], { env: ENV, encoding: 'utf8' });
   }
 
+  // ---- a session herdr no longer has: the phone leaves it and says so, instead of asking again every 6 seconds
+  {
+    const fsh = new URL('./fake-session.sh', import.meta.url).pathname;
+    execFileSync('bash', [fsh, 'gone'], { env: ENV, encoding: 'utf8' });
+    await page.waitForFunction(() => window.shepr.S.q.agents.some((a) => a.wlabel === 'gone'), null, { timeout: 15000 }).catch(async () => { await page.click('#refresh'); await page.waitForTimeout(4500); });
+    const key = await page.evaluate(() => { const a = window.shepr.S.q.agents.find((x) => x.wlabel === 'gone'); return a.host + '|' + a.pane; });
+    await tap(page, '.tab[data-view=waiting]'); await page.waitForTimeout(300);
+    await tap(page, `.item[data-key="${key}"]`); await page.waitForSelector('#detail:not([hidden])');
+    await page.waitForFunction(() => document.querySelector('#tail').textContent.length > 20);
+    execFileSync('bash', [fsh, 'gone-rm'], { env: ENV, encoding: 'utf8' });
+    await page.waitForSelector('#detail', { state: 'hidden', timeout: 14000 }).catch(() => {});
+    const g = await page.evaluate(() => ({ open: !document.getElementById('detail').hidden, cur: window.shepr.S.cur, toast: (document.getElementById('gtoast') || {}).textContent || '', tail: document.getElementById('tail').textContent }));
+    check('gone session: the phone leaves a session herdr no longer has', !g.open && g.cur === null);
+    check('gone session: it says so, and never shows "Could not read this session"', /That session is gone/.test(g.toast) && !/Could not read/.test(g.toast + g.tail));
+  }
+
   // ---- words typed at a numbered question are never sent as keystrokes
   {
     const bl = await page.evaluate(() => { const a = window.shepr.S.q.agents.find((x) => x.status === 'blocked' && x.wlabel === 'burnbar'); return a.host + '|' + a.pane; });
@@ -1096,6 +1112,10 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
 
   // ---- swipe left / right in a session to move to the next / previous open project
   {
+    // The fixtures removed just above can linger in the host's last poll for a few seconds. A swipe onto one is, correctly, a session
+    // that is gone and ends the walk early, so wait until the list holds only real sessions.
+    await page.click('#refresh');
+    await page.waitForFunction(() => !window.shepr.S.q.agents.some((a) => ['multi', 'freetext', 'nomenu', 'queued', 'gone'].indexOf(a.wlabel) >= 0), null, { timeout: 15000 }).catch(() => {});
     await tap(page, '.tab[data-view=waiting]'); await page.waitForTimeout(400);
     const first = await page.evaluate(() => { const l = [...document.querySelectorAll('#main .item')][0]; return l.dataset.key; });
     await tap(page, `.item[data-key="${first}"]`);
