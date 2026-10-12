@@ -59,6 +59,27 @@ On the iPhone, in **Safari**: open `https://<this-host>.<your-tailnet>.ts.net:87
 
 <p align="center"><img src="docs/img/pairing.svg" alt="Pairing: host shows a QR, phone scans it, the key never leaves, every call is signed" width="100%"></p>
 
+## Omarchy plugin
+
+This repository is also an Omarchy shell plugin, `nixfred.shepr`. It puts a dot and the number of agent sessions waiting on you in the bar. Its panel lists them, shows the Shepr address and pairs a phone with a QR code.
+
+<p align="center"><img src="preview.png" alt="The Shepr bar badge and panel: three sessions waiting, and a QR code that pairs a phone" width="55%"></p>
+
+The picture is a real capture from a test VM. The agents in it are made up: a stand-in herdr supplies them.
+
+```bash
+omarchy plugin add https://github.com/nixfred/shepr.git --enable
+cd ~/.config/omarchy/plugins/nixfred.shepr        # then follow "Use it" above, from this folder
+```
+
+The plugin folder is Shepr itself, so `omarchy plugin update nixfred.shepr` updates both. Run the **Use it** steps from that folder: the plugin asks the copy of `server.py` it sits next to (`status` and `pair`), and it finds your service by the unit that runs that file.
+
+It needs `herdr` on this machine, because the badge counts herdr's sessions, and `python3`. The QR needs `qrencode`. Phones need Tailscale, as in **Use it**. It only reads, except for the two buttons you press yourself: **Pair a phone** writes a one-time code, and **Start Shepr** runs `systemctl --user start` on the unit you installed. It never edits your configuration, never starts anything on its own and never answers an agent.
+
+In the panel the arrow keys or Tab move between the buttons, Enter presses one and Esc closes it. Two settings: the refresh interval (3 to 60 seconds, default 8) and whether the bar shows the number.
+
+To remove it, run `omarchy plugin remove nixfred.shepr`. That deletes the plugin folder. It leaves the Shepr service, your paired phones and `~/.local/state/shepr` alone, so removing Shepr itself is a separate step: `systemctl --user disable --now shepr`, delete the unit file, and delete the state folder.
+
 ## What is on screen
 
 | Tab | What |
@@ -245,8 +266,10 @@ path or method, an old timestamp, an unknown or revoked key. Five wrong codes in
 
 ```
 shepr pair [--ttl 180] [--png qr.png] [--json] [--no-wait]
+shepr pair --cancel      # drop a code that is still waiting to be used
 shepr devices            # list paired phones with SSH-style SHA256 fingerprints
 shepr revoke <name|id>   # sign a phone out now
+shepr status [--json]    # is the server up, how many phones, which agents are waiting (read only, needs no server)
 ```
 
 **This is not an SSH key.** A home-screen web app cannot speak SSH or hold an OpenSSH key; WebCrypto can. The device
@@ -310,7 +333,8 @@ The tests also use `SHEPR_LOCAL_ONLY`, `SHEPR_PUSH_ALLOW` and `SHEPR_USAGE_FIXTU
 ## Layout
 
 ```
-server.py            static files, /ping, /api, and the shepr CLI (pair|devices|revoke). Standard library only.
+server.py            static files, /ping, /api, and the shepr CLI (pair|devices|revoke|status). Standard library only.
+manifest.json        the Omarchy plugin: Service.qml (asks the CLI), BarWidget.qml (the badge), ShepPanel.qml (the panel), preview.png
 usage.py             the subscription meter: Claude, Codex, Grok and Kimi plan usage, measured on the host. Standard library only.
 index.html app.css app.js sw.js manifest.webmanifest
 icons/               logo.svg, app icons, launch images (iOS shows these before any code runs)
@@ -338,7 +362,7 @@ export CLAUDE_HOME=$PWD/tests/fixtures/claude-home CODEX_HOME=$PWD/tests/fixture
 export SHEPR_CLAUDE_CMD='echo STARTED' SHEPR_CODEX_CMD='echo CODEX' SHEPR_NEW_CMD='echo CCC' SHEPR_PROJECTS=/tmp/shepr-projects SHEPR_PUSH_ALLOW=127.0.0.1:9988
 python3 server.py 8743 &
 node tests/ui.mjs; node tests/sw_offline.mjs; node tests/push_sw.mjs; node tests/format.mjs; node tests/draft_commit.mjs; python3 tests/pair_cli_test.py
-for t in menu_parse server_hardening history push usage ledger; do python3 tests/${t}_test.py; done   # pure Python, no server needed
+for t in menu_parse server_hardening history push usage ledger status; do python3 tests/${t}_test.py; done   # pure Python, no server needed
 node tests/shots.mjs                           # regenerates docs/img/screens.png from the RUNNING app
 tests/fake-session.sh down
 ```

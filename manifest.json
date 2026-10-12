@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "id": "nixfred.shepr",
+  "name": "Shepr",
+  "version": "1.0.0",
+  "author": "nixfred",
+  "license": "MIT",
+  "description": "Shows which herdr agent sessions are waiting on you, and pairs your iPhone with Shepr, the home-screen app that reads and answers them. A bar badge, a waiting list and a pairing QR.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Shepr",
+    "description": "A dot and the number of agent sessions waiting on you. Click for the list, the Shepr address and a QR that pairs a phone.",
+    "category": "AI",
+    "aliases": ["shepr", "herdr", "agents", "iphone", "waiting", "claude", "codex"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "intervalSec": 8,
+      "showCount": true
+    },
+    "schema": [
+      {
+        "key": "intervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "description": "How often the badge asks herdr how many sessions are waiting. It only reads.",
+        "min": 3,
+        "max": 60,
+        "defaultValue": 8
+      },
+      {
+        "key": "showCount",
+        "type": "boolean",
+        "label": "Show the number on the bar",
+        "description": "The waiting count beside the dot. Off leaves just the dot.",
+        "defaultValue": true
+      }
+    ]
+  },
+  "repository": "https://github.com/nixfred/shepr",
+  "homepage": "https://github.com/nixfred/shepr"
+}

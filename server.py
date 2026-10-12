@@ -2639,12 +2639,8 @@ def _service_runs(text, me):
     return False
 
 
-def unit_hint():
-    """How to start the server on this machine.
-
-    A user unit counts only when it runs this server.py. nixweb names its unit after the session
-    directory. The README writes shepr.service. With neither installed, both names are examples.
-    """
+def unit_names():
+    """The user units on this machine that run THIS server.py (nixweb names one after the session directory, the README writes shepr.service)."""
     me = os.path.realpath(__file__)
     unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd", "user")
     names = []
@@ -2663,6 +2659,15 @@ def unit_hint():
             continue
         if _service_runs(text, me):
             names.append(name[:-len(".service")])
+    return names
+
+
+def unit_hint():
+    """How to start the server on this machine.
+
+    A user unit counts only when it runs this server.py. With none installed, both names are examples.
+    """
+    names = unit_names()
     if len(names) == 1:
         return f"systemctl --user start {names[0]}"
     if names:
@@ -2672,6 +2677,13 @@ def unit_hint():
 
 
 def cli_pair(a):
+    if a.cancel:   # drop a code that is still waiting to be used (the bar widget's Cancel button); needs no server
+        try:
+            os.remove(pairing_path())
+            print("pairing code cancelled")
+        except OSError:
+            print("no pairing code was waiting")
+        return 0
     info = server_info()
     if not info:
         sys.exit("shepr: the server is not running here. Start it first: " + unit_hint())
@@ -2722,6 +2734,40 @@ def cli_pair(a):
     return 1
 
 
+def cli_status(a):
+    """One look at this machine, for the Omarchy bar widget and for you: is the server up, how many phones are
+    paired, and which agents are waiting on you. It only reads, and it never needs the server or a phone."""
+    info = server_info()
+    out = {"build": BOOT_BUILD, "running": bool(info), "url": (info or {}).get("url"), "devices": len(devices()),
+           "units": unit_names(), "herdr": False, "counts": {}, "waiting": []}
+    try:
+        agents = run_herdr(None, ["agent", "list"], timeout=6)["result"]["agents"]
+        labels = {w["workspace_id"]: w.get("label") for w in run_herdr(None, ["workspace", "list"], timeout=6)["result"]["workspaces"]}
+        out["herdr"] = True
+        for ag in agents:
+            st = ag.get("agent_status") or "unknown"
+            out["counts"][st] = out["counts"].get(st, 0) + 1
+            if st == "blocked" and len(out["waiting"]) < 12:
+                out["waiting"].append({"project": labels.get(ag.get("workspace_id")) or os.path.basename(ag.get("cwd") or "") or "?",
+                                       "title": ag.get("terminal_title_stripped") or "", "agent": ag.get("agent") or "", "pane": ag.get("pane_id")})
+    except HerdrError as e:
+        out["herdr_error"] = e.message
+    except (KeyError, TypeError, AttributeError):
+        out["herdr_error"] = "herdr answered in a shape Shepr does not know"
+    if a.json:
+        print(json.dumps(out), flush=True)
+        return 0
+    print(f"shepr {BOOT_BUILD}: " + (f"running at {out['url']}" if out["running"] else f"not running. Start it: {unit_hint()}"))
+    print(f"  {out['devices']} phone(s) paired" + ("" if out["devices"] else ". Pair one: shepr pair"))
+    if out["herdr"]:
+        print("  agents: " + (", ".join(f"{n} {k}" for k, n in sorted(out["counts"].items())) or "none"))
+        for w in out["waiting"]:
+            print(f"  waiting: {w['project']}" + (f" - {w['title']}" if w["title"] else ""))
+    else:
+        print("  herdr: " + out.get("herdr_error", "not available"))
+    return 0
+
+
 def cli_devices(a):
     devs = devices()
     if not devs:
@@ -2769,17 +2815,21 @@ class CappedServer(ThreadingHTTPServer):
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] in ("pair", "devices", "revoke"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("pair", "devices", "revoke", "status"):
         ap = argparse.ArgumentParser(prog="shepr")
         sub = ap.add_subparsers(dest="cmd", required=True)
         p = sub.add_parser("pair", help="show a QR that pairs one phone, then wait for it")
         p.add_argument("--ttl", type=int, default=180); p.add_argument("--png"); p.add_argument("--json", action="store_true")
         p.add_argument("--no-wait", action="store_true")
+        p.add_argument("--cancel", action="store_true", help="drop a code that is still waiting to be used")
         sub.add_parser("devices", help="list paired phones")
+        st = sub.add_parser("status", help="is the server up, how many phones, what is waiting on you")
+        st.add_argument("--json", action="store_true")
         r = sub.add_parser("revoke", help="sign a phone out"); r.add_argument("who")
         a = ap.parse_args()
-        learn_tailnet()
-        sys.exit({"pair": cli_pair, "devices": cli_devices, "revoke": cli_revoke}[a.cmd](a))
+        if a.cmd != "status":
+            learn_tailnet()   # status only reads, and a bar widget polls it, so it skips the tailscale call
+        sys.exit({"pair": cli_pair, "devices": cli_devices, "revoke": cli_revoke, "status": cli_status}[a.cmd](a))
 
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("port", nargs="?", type=int, default=8742)
