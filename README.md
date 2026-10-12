@@ -74,7 +74,9 @@ cd ~/.config/omarchy/plugins/nixfred.shepr        # then follow "Use it" above, 
 
 The plugin folder is Shepr itself, so `omarchy plugin update nixfred.shepr` updates both. Run the **Use it** steps from that folder: the plugin asks the copy of `server.py` it sits next to (`status` and `pair`), and it finds your service by the unit that runs that file.
 
-It needs `herdr` on this machine, because the badge counts herdr's sessions, and `python3`. The QR needs `qrencode`. Phones need Tailscale, as in **Use it**. It only reads, except for the two buttons you press yourself: **Pair a phone** writes a one-time code, and **Start Shepr** runs `systemctl --user start` on the unit you installed. It never edits your configuration, never starts anything on its own and never answers an agent.
+It needs `herdr` on this machine, because the badge counts herdr's sessions, and `python3`. The QR needs `qrencode`. Phones need Tailscale, as in **Use it**. It only reads, except for the two buttons you press yourself: **Pair a phone** writes a one-time code (and the QR picture that carries it, see below), and **Start Shepr** runs `systemctl --user start` on the unit you installed. It never edits your configuration, never starts anything on its own and never answers an agent.
+
+The QR picture holds the one-time code, so it is handled like a secret: the code goes to `qrencode` over stdin (never as an argument, where `ps` could show it), and the picture is created owner-only (mode 0600) in a private directory the CLI checks first: `$XDG_RUNTIME_DIR/shepr` when that belongs to you and is closed to others, otherwise `~/.local/state/shepr/run`. It is never written to `/tmp`. Cancel, expiry or a phone pairing removes the picture and the code.
 
 In the panel the arrow keys or Tab move between the buttons, Enter presses one and Esc closes it. Two settings: the refresh interval (3 to 60 seconds, default 8) and whether the bar shows the number.
 
@@ -265,7 +267,7 @@ Every later request is signed over `time, nonce, method, path, sha256(body)`. Th
 path or method, an old timestamp, an unknown or revoked key. Five wrong codes in a minute locks pairing for a minute.
 
 ```
-shepr pair [--ttl 180] [--png qr.png] [--json] [--no-wait]
+shepr pair [--ttl 180] [--png [qr.png]] [--json] [--no-wait]   # --png writes the QR owner-only; with no name, into a private directory
 shepr pair --cancel      # drop a code that is still waiting to be used
 shepr devices            # list paired phones with SSH-style SHA256 fingerprints
 shepr revoke <name|id>   # sign a phone out now

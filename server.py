@@ -36,6 +36,7 @@ import secrets
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -2676,8 +2677,94 @@ def unit_hint():
             "nixweb names its unit nixweb-<session>)")
 
 
+QR_NAME = "pair-qr.png"
+
+
+def _own_private_dir(path, create=True):
+    """True when path is a real directory (never a symlink) that belongs to this user and that nobody else can enter.
+
+    An existing directory of ours with looser permissions is tightened to 0700 when create is set; one that is not
+    ours is never trusted, so the pairing picture never lands where another user could read it."""
+    if create:
+        try:
+            os.makedirs(path, mode=0o700, exist_ok=True)
+        except OSError:
+            return False
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        return False
+    if st.st_mode & 0o077:
+        if not create:
+            return False
+        try:
+            os.chmod(path, 0o700)
+            st = os.lstat(path)
+        except OSError:
+            return False
+    return not (st.st_mode & 0o077)
+
+
+def _qr_dirs():
+    """Where the pairing picture may live, best first, as (parent, subfolder, may_create_parent). Never /tmp.
+
+    $XDG_RUNTIME_DIR is the session's own directory (systemd makes it 0700): used as it is, never created or
+    loosened. Shepr's state directory is the fallback, for a machine with no XDG_RUNTIME_DIR at all."""
+    out = []
+    xdg = os.environ.get("XDG_RUNTIME_DIR") or ""
+    if os.path.isabs(xdg):
+        out.append((os.path.realpath(xdg), "shepr", False))
+    out.append((os.path.realpath(STATE_DIR), "run", True))
+    return out
+
+
+def private_qr_path():
+    """A path for the pairing picture inside a verified private directory, or None when no such directory can be had."""
+    for parent, sub, make in _qr_dirs():
+        d = os.path.join(parent, sub)
+        if _own_private_dir(parent, create=make) and _own_private_dir(d):
+            return os.path.join(d, QR_NAME)
+    return None
+
+
+def forget_qr_pictures():
+    """Remove the pairing picture from every place private_qr_path might have put it (looks only, creates nothing)."""
+    for parent, sub, _ in _qr_dirs():
+        try:
+            os.remove(os.path.join(parent, sub, QR_NAME))
+        except OSError:
+            pass
+
+
+def write_qr_png(url, path):
+    """Draw url as a PNG at path. The URL carries the one-time pairing code, so it reaches qrencode over stdin (an
+    argument would show in the process list) and the picture is born owner-only (0600), replacing whatever was at
+    path and never following a symlink. Nothing secret exists on disk before that."""
+    try:
+        png = subprocess.run(["qrencode", "-o", "-", "-s", "10", "-m", "4", "-l", "M"], input=url.encode(),
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True).stdout
+    except (subprocess.CalledProcessError, OSError):
+        sys.exit("shepr: qrencode could not draw the QR")
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        sys.exit(f"shepr: cannot replace {path}: {e.strerror}")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as e:
+        sys.exit(f"shepr: cannot write the QR picture to {path}: {e.strerror}")
+    with os.fdopen(fd, "wb") as f:
+        os.fchmod(f.fileno(), 0o600)
+        f.write(png)
+
+
 def cli_pair(a):
     if a.cancel:   # drop a code that is still waiting to be used (the bar widget's Cancel button); needs no server
+        forget_qr_pictures()   # the QR holds that code: it goes with it
         try:
             os.remove(pairing_path())
             print("pairing code cancelled")
@@ -2693,16 +2780,22 @@ def cli_pair(a):
     write_pairing({"hash": hashlib.sha256(code.encode()).hexdigest(), "expires": time.time() + ttl,
                    "created": int(time.time()), "used_by": None})
     url = f"{info['url']}/#shepr-pair={shown}"
-    if a.png:
+    png = a.png
+    if png:
         if not shutil.which("qrencode"):
             sys.exit("shepr: --png needs qrencode (not installed)")
-        subprocess.run(["qrencode", "-o", a.png, "-s", "10", "-m", "4", "-l", "M", url], check=True)
+        if png is True:   # --png with no file name: a picture in a private directory (the bar widget uses this)
+            png = private_qr_path()
+            if not png:
+                sys.exit("shepr: no private directory for the QR picture (neither $XDG_RUNTIME_DIR nor " +
+                         os.path.join(STATE_DIR, "run") + " is owned by you and closed to others)")
+        write_qr_png(url, png)
     if a.json:
-        print(json.dumps({"url": url, "code": shown, "expires": int(time.time() + ttl), "png": a.png}), flush=True)
+        print(json.dumps({"url": url, "code": shown, "expires": int(time.time() + ttl), "png": png or None}), flush=True)
     else:
         print(f"\n  \033[1;36mSHEPR\033[0m  pair a phone with \033[1m{LOCAL}\033[0m\n")
         if shutil.which("qrencode"):
-            subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "2", "-l", "M", url], check=False)
+            subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "2", "-l", "M"], input=url.encode(), check=False)   # stdin, not argv
         else:
             print("  (qrencode is not installed, so there is no QR here: install it for a scannable code)")
         print(f"\n  1. Open \033[1mShepr\033[0m on the iPhone and tap \033[1mScan\033[0m")
@@ -2819,7 +2912,7 @@ def main():
         ap = argparse.ArgumentParser(prog="shepr")
         sub = ap.add_subparsers(dest="cmd", required=True)
         p = sub.add_parser("pair", help="show a QR that pairs one phone, then wait for it")
-        p.add_argument("--ttl", type=int, default=180); p.add_argument("--png"); p.add_argument("--json", action="store_true")
+        p.add_argument("--ttl", type=int, default=180); p.add_argument("--png", nargs="?", const=True, metavar="FILE", help="also write the QR as a picture, owner-only (no FILE: a private directory)"); p.add_argument("--json", action="store_true")
         p.add_argument("--no-wait", action="store_true")
         p.add_argument("--cancel", action="store_true", help="drop a code that is still waiting to be used")
         sub.add_parser("devices", help="list paired phones")

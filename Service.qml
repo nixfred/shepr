@@ -4,7 +4,7 @@ import Quickshell.Io
 
 // Shepr for the Omarchy bar. This service owns every fact the bar badge and the panel show, so the two can never
 // disagree. It asks the Shepr CLI that ships in this same folder: `server.py status --json` every few seconds (a
-// read-only look at herdr, the paired phones and the Shepr service), and `server.py pair --json --png <file>
+// read-only look at herdr, the paired phones and the Shepr service), and `server.py pair --json --png
 // --no-wait` when you ask for a phone to be paired. Everything in the answers is DATA: the panel draws it as plain
 // text and never as markup.
 Item {
@@ -13,8 +13,6 @@ Item {
   property var settings: ({})
 
   readonly property string pluginDir: decodeURIComponent(String(Qt.resolvedUrl(".")).replace(/^file:\/\/(localhost)?/, ""))
-  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
-  readonly property string pairPngPath: runtimeDir + "/shepr-pair-qr.png"
   readonly property string readmeUrl: "https://github.com/nixfred/shepr#use-it"
 
   readonly property int intervalSec: {
@@ -95,8 +93,7 @@ Item {
 
   function endPairing() {
     pairing = false; pairCode = ""; pairImage = ""; pairExpires = 0
-    cleanup.running = true   // the QR holds a one-time code: remove the picture when it is no longer needed
-    cancelCode.running = true   // and drop the code itself, so a cancelled code cannot be redeemed
+    cancelCode.running = true   // drops the code, so a cancelled code cannot be redeemed, and removes the QR picture that holds it
   }
 
   function applyPair(text) {
@@ -107,13 +104,15 @@ Item {
     pairExpires = d.expires
     now = Date.now() / 1000
     pairSerial += 1
-    pairImage = d.png ? "file://" + d.png + "?n=" + pairSerial : ""
+    pairImage = d.png ? "file://" + String(d.png).split("/").map(encodeURIComponent).join("/") + "?n=" + pairSerial : ""
     pairing = true
   }
 
   Process {
     id: pairProc
-    command: ["python3", root.pluginDir + "server.py", "pair", "--png", root.pairPngPath, "--json", "--no-wait", "--ttl", "180"]
+    // --png with no file name: the CLI draws the picture itself, owner-only, in a private directory it has verified
+    // (never /tmp), and the one-time code travels to qrencode over stdin, never in an argument.
+    command: ["python3", root.pluginDir + "server.py", "pair", "--png", "--json", "--no-wait", "--ttl", "180"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.applyPair(text) }
     // stderr also carries harmless notes (for example that Tailscale is absent), so it only counts as THE reason
     // when the command failed.
@@ -131,7 +130,6 @@ Item {
     }
   }
 
-  Process { id: cleanup; command: ["rm", "-f", root.pairPngPath] }
   Process { id: cancelCode; command: ["python3", root.pluginDir + "server.py", "pair", "--cancel"] }
 
   Timer {
