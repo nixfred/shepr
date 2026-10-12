@@ -618,6 +618,13 @@ def human_keys(keys):
     return " ".join(sym.get(k, k) for k in keys)
 
 
+def _menu_fp(menu):
+    """Question, cursor and options, so keys planned for one question cannot land on the next."""
+    if not menu:
+        return None
+    return [menu.get("question"), menu["cur_idx"], [[o["n"], o["label"], o["checked"]] for o in menu["options"]]]
+
+
 def need_host(hid):
     with LOCK:
         known = {h["id"] for h in SNAP["hosts"] if h["status"] == "ok"}
@@ -668,6 +675,9 @@ def build_plan(body):
     a = get_agent(host, pane)
     status = a["agent_status"]
     steps, lines, approves = [], [], False
+    bare_text = False   # words typed at a blocked pane that was not a numbered menu
+    keys_menu, menu_fp = False, None
+    queued_line = False
 
     if kind == "text":
         text = body.get("text")
@@ -698,6 +708,7 @@ def build_plan(body):
                 return build_plan(dict(body, kind="choose", option=free["n"], text=text))
             steps = [{"op": "text", "text": text}, {"op": "keys", "keys": ["enter"]}]
             lines = [("Types into the dialog", text), ("Then presses", "⏎")]
+            bare_text = True
         else:
             steps = [{"op": "prompt", "text": text}]
             lines = [("Sends as a prompt", text)]
@@ -712,6 +723,7 @@ def build_plan(body):
             raise HerdrError("nothing_queued", "no message is waiting in the queue of that session right now")
         steps = [{"op": "keys", "keys": ["ctrl+enter"]}]
         lines = [("Presses", "Ctrl+Enter"), ("Does", "Claude Code sends your queued message now instead of waiting for the current work to end")]
+        queued_line = True
     elif kind in ("model", "effort"):
         # Claude Code takes /model <name> and /effort <level> as plain arguments (verified on 2.1.293): no menu, no model call.
         if a.get("agent") != "claude":
@@ -734,6 +746,9 @@ def build_plan(body):
             raise HerdrError("bad_keys", "the agent is working: the only key allowed is Esc (interrupt)")
         steps = [{"op": "keys", "keys": keys}]
         lines = [("Presses", human_keys(keys))]
+        if status == "blocked":
+            # The same blocked dialog can change question without moving state_change_seq. Remember the screen.
+            keys_menu, menu_fp = True, _menu_fp(parse_menu(read_tail(host, pane, 80)))
     elif kind == "choose":
         if status != "blocked":
             raise HerdrError("not_blocked", "choosing an option only applies to a blocked agent")
@@ -829,6 +844,12 @@ def build_plan(body):
         plan["snap"]["text_at"] = free_o["idx"]
     if kind == "multi":
         plan["snap"]["multi"] = [[o["n"], o["label"], o["checked"]] for o in menu["options"]] + [menu["cur_idx"], menu["action"]["idx"]]
+    if bare_text:
+        plan["snap"]["bare"] = True
+    if keys_menu:
+        plan["snap"]["menu_at"] = menu_fp
+    if queued_line:
+        plan["snap"]["queued"] = True
     with LOCK:
         for k in [k for k, p in PLANS.items() if p["expires"] < time.time()]:
             del PLANS[k]
@@ -919,6 +940,17 @@ def _commit_pane_plan(host, plan):
         o = menu and next((o for o in menu["options"] if o["n"] == n), None)
         if not o or o["label"] != label or menu["current"] != cur:
             raise HerdrError("moved_on", "the menu on screen is not the one you chose from, so nothing was sent.")
+    # Words typed at a blocked pane that was not a numbered menu. A later step of that same dialog can put a
+    # numbered question up without moving state_change_seq, and a digit would pick an option. Only a plan prepare
+    # marked bare is checked, so a hand-built plan is left as it was.
+    if snap.get("bare") and parse_menu(read_tail(host, plan["pane"], 80)):
+        raise HerdrError("moved_on", "a numbered question is on screen now, so your words were not typed")
+    # Keys planned while blocked. Absent on a hand-built plan, and on keys sent when the agent was not blocked.
+    if "menu_at" in snap and _menu_fp(parse_menu(read_tail(host, plan["pane"], 80))) != snap["menu_at"]:
+        raise HerdrError("moved_on", "the question on screen is not the one these keys were for, so nothing was sent")
+    # Send now is allowed only while "ctrl+enter to send now" is on screen. That line can go without the state counter moving.
+    if snap.get("queued") and not QUEUED_RE.search(read_tail(host, plan["pane"], 60)):
+        raise HerdrError("moved_on", "the queued message is no longer on screen, so Ctrl+Enter was not sent")
     done = []
     steps = plan["steps"]
     for i, step in enumerate(steps):
@@ -945,6 +977,12 @@ def _commit_pane_plan(host, plan):
         try:
             run_step(host, plan["pane"], step)
             done.append(step["op"])
+            if step["op"] == "await_clear":
+                # The question can close because a different session now owns the pane. Do not prompt that one.
+                # Still-blocked is already refused inside await_clear; the same session, now idle, is sent.
+                a_clear = get_agent(host, plan["pane"])
+                if (a_clear.get("agent_session") or {}).get("value") != snap["session"]:
+                    raise HerdrError("moved_on", "the session changed after the question closed, so your words were not sent")
             if step.get("wait"):
                 time.sleep(step["wait"])
         except HerdrError as e:
@@ -1359,8 +1397,10 @@ def hosts_view():
                       "target": m.get("target"), "status": st.get("status"), "error": st.get("error"), "last_ok": st.get("last_ok"),
                       "counts": st.get("counts", {})})
     pk = hub_pubkey()
+    # shlex.quote: a key comment is free text ("fred's laptop", or a quote that would close the
+    # single quotes). The Copy key button pastes this line onto another machine.
     return {"saved": saved, "scan": scan, "hub": LOCAL, "pubkey": pk,
-            "enroll": f"mkdir -p ~/.ssh && echo '{pk}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" if pk else None}
+            "enroll": "mkdir -p ~/.ssh && echo " + shlex.quote(pk) + " >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" if pk else None}
 
 
 # --------------------------------------------------------------------------------------------

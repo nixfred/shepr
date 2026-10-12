@@ -1,6 +1,6 @@
 """Regression tests for the 2026-10-09 bug hunt (Codex, 19 findings). Pure Python, nothing talks to herdr, the
 network or the real state directory.  Run: python3 tests/server_hardening_test.py"""
-import hashlib, importlib.util, json, os, sys, tempfile, threading, time
+import hashlib, importlib.util, json, os, shutil, subprocess, sys, tempfile, threading, time
 here = os.path.dirname(os.path.abspath(__file__))
 os.environ["SHEPR_STATE"] = tempfile.mkdtemp()
 for _k in ("SHEPR_NEW_CMD", "SHEPR_CLAUDE_CMD", "SHEPR_CODEX_CMD", "SHEPR_PROJECTS", "SHEPR_PUSH_ALLOW", "SHEPR_READONLY"): os.environ.pop(_k, None)   # a test pins its own settings, not the shell's
@@ -375,6 +375,29 @@ hv = srv.hosts_view()
 vic = next(h for h in hv["saved"] if h["id"] == "vic")
 check("hosts: a down machine reports its error and when it last answered, for the Hosts page", vic["status"] == "down" and vic["error"].startswith("timeout") and vic["last_ok"] == 1791600000.0)
 
+def bash_enroll(pk):
+    """Run the Copy-key command in a throwaway home. Returns (rc, authorized_keys text, whether INJECTED appeared)."""
+    srv.hub_pubkey = lambda: pk
+    cmd = srv.hosts_view()["enroll"]
+    home = tempfile.mkdtemp()
+    env = dict(os.environ); env["HOME"] = home
+    r = subprocess.run(["bash", "-c", cmd], cwd=home, env=env, capture_output=True, text=True, timeout=5)
+    keyp = os.path.join(home, ".ssh", "authorized_keys")
+    wrote = open(keyp).read() if os.path.exists(keyp) else ""
+    side = os.path.exists(os.path.join(home, "INJECTED"))
+    shutil.rmtree(home, ignore_errors=True)
+    return r.returncode, wrote, side
+
+plain_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterial user@host"
+rc, wrote, side = bash_enroll(plain_key)
+check("enroll: a normal public key is appended as that one line", rc == 0 and wrote == plain_key + "\n" and not side)
+apos_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterial fred's laptop"
+rc, wrote, side = bash_enroll(apos_key)
+check("enroll: an apostrophe in the key comment still installs that exact key", rc == 0 and wrote == apos_key + "\n" and not side)
+bad_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterial x'; touch INJECTED; echo '"
+rc, wrote, side = bash_enroll(bad_key)
+check("enroll: a quote in the key comment cannot run a command beside the echo", rc == 0 and wrote == bad_key + "\n" and not side)
+
 check("gone session: herdr agent_not_found and pane_not_found are 404, so the phone can leave",
       srv.http_status("agent_not_found") == 404 and srv.http_status("pane_not_found") == 404)
 check("gone session: a bad request stays 400, a dead herdr stays 502, an unknown host stays 404",
@@ -493,5 +516,121 @@ check("open folder: committing makes the herdr project in that folder, then type
       calls[0][:4] == ["workspace", "create", "--label", "plain"] and calls[0][calls[0].index("--cwd") + 1] == os.path.join(froot, "plain") and calls[1][:3] == ["pane", "run", "w9:p1"]
       and calls[1][3] == f"cd {froot}/plain && ccc" and sorted(os.listdir(froot)) == before and os.listdir(os.path.join(froot, "plain")) == [])
 shutil.rmtree(froot)
+
+# ---- words for a blocked pane that is not a menu must not be typed if a numbered question appears first
+bare_screen = {"t": "Some prompt that is not a numbered menu\n> "}
+srv.READONLY = False
+srv.need_host = lambda h: {"id": "gus", "machine": None, "kind": "local", "enabled": True}
+srv.get_agent = lambda host, pane: {"agent": "claude", "agent_status": "blocked", "state_change_seq": 7, "agent_session": {"value": "s1"}, "cwd": "/tmp/x"}
+srv.read_tail = lambda host, pane, n, **k: bare_screen["t"]
+sent_bare = []
+srv.run_step = lambda host, pane, step: sent_bare.append(dict(step))
+srv.LAST_SENT.clear()
+pb = srv.build_plan({"kind": "text", "text": "1", "host": "gus", "pane": "w1:p1"})
+bare_screen["t"] = "Do you want to proceed?\n\u276f 1. Yes\n  2. No\n"
+try:
+    srv.commit_plan(pb["nonce"]); bare_err = None
+except srv.HerdrError as e:
+    bare_err = e.code
+check("typing: if a numbered question appears before the commit, the words are not typed", bare_err == "moved_on" and sent_bare == [])
+bare_screen["t"] = "Some prompt that is not a numbered menu\n> "
+sent_bare.clear(); srv.LAST_SENT.clear()
+pb = srv.build_plan({"kind": "text", "text": "hello", "host": "gus", "pane": "w1:p1"})
+try:
+    srv.commit_plan(pb["nonce"]); bare_ok = None
+except srv.HerdrError as e:
+    bare_ok = e.code
+check("typing: a blocked pane that stays a non-menu still gets the words and Enter", bare_ok is None and [s["op"] for s in sent_bare] == ["text", "keys"] and sent_bare[0]["text"] == "hello")
+# ---- keys planned for one blocked screen must not land on a later question that shares herdr's state counter
+MENU_A = "Old question?\n\u276f 1. Keep going\n  2. Stop here\n"
+MENU_B = "Do you want to proceed?\n\u276f 1. Yes\n  2. No\n"
+NONMENU = "Some prompt that is not a numbered menu\n> "
+kscreen = {"t": MENU_A}
+srv.READONLY = False
+srv.need_host = lambda h: {"id": "gus", "machine": None, "kind": "local", "enabled": True}
+srv.get_agent = lambda host, pane: {"agent": "claude", "agent_status": "blocked", "state_change_seq": 7, "agent_session": {"value": "s1"}, "cwd": "/tmp/x"}
+srv.read_tail = lambda host, pane, n, **k: kscreen["t"]
+sent_k = []
+srv.run_step = lambda host, pane, step: sent_k.append(dict(step))
+
+def commit_keys(before, after, keys):
+    sent_k.clear(); srv.LAST_SENT.clear(); kscreen["t"] = before
+    p = srv.build_plan({"kind": "keys", "keys": keys, "host": "gus", "pane": "w1:p1"})
+    kscreen["t"] = after
+    try:
+        srv.commit_plan(p["nonce"]); return None
+    except srv.HerdrError as e:
+        return e.code
+
+err = commit_keys(MENU_A, MENU_B, ["1", "enter"])
+check("keys: a different question with the same state counter does not receive the keys", err == "moved_on" and sent_k == [])
+err = commit_keys(NONMENU, MENU_B, ["enter"])
+check("keys: Enter planned against a non-menu is not sent once a numbered question is up", err == "moved_on" and sent_k == [])
+err = commit_keys(MENU_A, MENU_A, ["1", "enter"])
+check("keys: the same question still receives the keys", err is None and sent_k == [{"op": "keys", "keys": ["1", "enter"]}])
+err = commit_keys(NONMENU, NONMENU, ["enter"])
+check("keys: a blocked pane that stays a non-menu still receives Enter", err is None and sent_k == [{"op": "keys", "keys": ["enter"]}])
+# ---- Send now is Ctrl+Enter only while the queue line is still on screen. The state counter need not move when it goes.
+qscreen = {"t": fx("sample-queued.txt")}
+srv.READONLY = False
+srv.need_host = lambda h: {"id": "gus", "machine": None, "kind": "local", "enabled": True}
+srv.get_agent = lambda host, pane: {"agent": "claude", "agent_status": "working", "state_change_seq": 8, "agent_session": {"value": "s1"}, "cwd": "/tmp/x"}
+srv.read_tail = lambda host, pane, n, **k: qscreen["t"]
+sent_q = []
+srv.run_step = lambda host, pane, step: sent_q.append(dict(step))
+srv.LAST_SENT.clear()
+pq = srv.build_plan({"kind": "sendnow", "host": "gus", "pane": "w1:p1"})
+qscreen["t"] = "still working, the queue line is gone\n"
+try:
+    srv.commit_plan(pq["nonce"]); qerr = None
+except srv.HerdrError as e:
+    qerr = e.code
+check("send now: if the queue line disappears before the commit, Ctrl+Enter is not sent", qerr == "moved_on" and sent_q == [])
+qscreen["t"] = fx("sample-queued.txt")
+sent_q.clear(); srv.LAST_SENT.clear()
+pq = srv.build_plan({"kind": "sendnow", "host": "gus", "pane": "w1:p1"})
+try:
+    srv.commit_plan(pq["nonce"]); qok = None
+except srv.HerdrError as e:
+    qok = e.code
+check("send now: while the queue line is still on screen, Ctrl+Enter is sent", qok is None and sent_q == [{"op": "keys", "keys": ["ctrl+enter"]}])
+# ---- skip waits for the question to close, then must not prompt a different session that now owns the pane
+calls_s = []
+srv.run_herdr = lambda machine, args, timeout=10, want_json=True: calls_s.append(list(args)) or ""
+srv.run_step = REAL_RUN_STEP
+srv.need_host = lambda h: {"id": "gus", "machine": None, "kind": "local", "enabled": True}
+srv.READONLY = False
+srv.read_tail = lambda host, pane, n, **k: "Do you want to proceed?\n\u276f 1. Yes\n  2. No\n"
+n_s = {"i": 0}
+def ga_changed(host, pane):
+    n_s["i"] += 1
+    if n_s["i"] <= 2:
+        return {"agent": "claude", "agent_status": "blocked", "state_change_seq": 9, "agent_session": {"value": "sess-A"}, "cwd": "/tmp/proj"}
+    return {"agent": "claude", "agent_status": "idle", "state_change_seq": 1, "agent_session": {"value": "sess-B"}, "cwd": "/tmp/other"}
+srv.get_agent = ga_changed
+srv.LAST_SENT.clear()
+ps = srv.build_plan({"kind": "text", "text": "the words", "skip": True, "host": "gus", "pane": "w1:p1"})
+try:
+    srv.commit_plan(ps["nonce"]); serr = None
+except srv.HerdrError as e:
+    serr = e.code
+prompts = [c for c in calls_s if len(c) >= 2 and c[:2] == ["agent", "prompt"]]
+check("skip: a session that changes after the question closes does not get the words", serr == "moved_on" and prompts == [])
+n_s["i"] = 0
+calls_s.clear()
+def ga_same(host, pane):
+    n_s["i"] += 1
+    if n_s["i"] <= 2:
+        return {"agent": "claude", "agent_status": "blocked", "state_change_seq": 9, "agent_session": {"value": "sess-A"}, "cwd": "/tmp/proj"}
+    return {"agent": "claude", "agent_status": "idle", "state_change_seq": 10, "agent_session": {"value": "sess-A"}, "cwd": "/tmp/proj"}
+srv.get_agent = ga_same
+srv.LAST_SENT.clear()
+ps = srv.build_plan({"kind": "text", "text": "the words", "skip": True, "host": "gus", "pane": "w1:p1"})
+try:
+    srv.commit_plan(ps["nonce"]); serr = None
+except srv.HerdrError as e:
+    serr = e.code
+prompts = [c for c in calls_s if len(c) >= 2 and c[:2] == ["agent", "prompt"]]
+check("skip: the same session, once the question has closed, still gets the words", serr is None and prompts == [["agent", "prompt", "w1:p1", "the words"]])
 
 sys.exit(0 if ok else 1)

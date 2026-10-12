@@ -1,7 +1,10 @@
 // Text rendering check: feeds the renderer sample terminal output and screenshots it. Needs a server on :8743.
 import { createRequire } from 'module';
-const require = createRequire(process.env.PW_PATH || '/home/pi/.local/share/mise/installs/npm-playwright/latest/node_modules/');
-const { chromium, devices } = require('playwright');
+// Playwright is a global install, not an npm dependency (nixweb rule). Look where a stranger would have it.
+const pw = [process.env.PW_PATH, (process.env.HOME || '') + '/.local/share/mise/installs/npm-playwright/latest/node_modules/', '/usr/local/lib/node_modules/', '/usr/lib/node_modules/']
+  .filter(Boolean).map((d) => { try { return createRequire(d)('playwright'); } catch { return null; } }).find(Boolean);
+if (!pw) { console.error('playwright not found: npm i -g playwright, or set PW_PATH to its node_modules directory'); process.exit(1); }
+const { chromium, devices } = pw;
 const SAMPLE = `● I checked the three open PRs and merged the two that were green.
 
   Findings:

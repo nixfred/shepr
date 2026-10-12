@@ -221,7 +221,9 @@ the host's load is above its core count.
 A send is two requests. `prepare` returns exactly what will happen (the keys, the text, which agent, what state it
 is in) plus a one-use nonce. `commit` runs it. The preview is bound to the agent's `state_change_seq`: if the agent
 moved on while you looked, nothing is sent. A failed send is reported and never retried; a failed write may still
-have landed, and the message says so.
+have landed, and the message says so. A dialog with several steps keeps one `state_change_seq`, so at confirm the host also reads
+the screen again: keys or words planned for one question are refused if a different question is on screen now, Send now is refused
+once its queue line has gone, and Skip and send is refused if another session took the pane. In each case nothing is sent.
 
 - **Words at a numbered question are never typed into it** (a digit would pick an option). Shepr keeps your message in view and offers **Skip and send**: Esc closes the question without answering it, Shepr waits until it has closed, then sends your message as an ordinary prompt. You review both steps first. If the question will not close, nothing is sent and your words stay in the box.
 - A blocked agent gets keys, not prompts: option buttons (it works out the ↓ presses from the screen), an
@@ -261,6 +263,28 @@ you** (nodes shared in from another user are never touched), and reports each as
 `no herdr` (checked on the plain PATH and in the login shell), or `unreachable`. Add and on/off go through the same
 preview-and-confirm sheet and run `herdr machine add|enable|disable`.
 
+## Configuration
+
+Every setting is an environment variable on the server. Nothing needs setting for a normal install except `SHEPR_NEW_CMD` if you have no `ccc` alias.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SHEPR_NEW_CMD` | `ccc` | The command typed to start a session in Start new and Existing folder. `ccc` is the author's own shell alias for Claude Code, so on any other machine set this to `claude` or your own alias. |
+| `SHEPR_CLAUDE_CMD` / `SHEPR_CODEX_CMD` | `claude` / `codex` | The commands typed to wake a sleeping Claude or Codex project. |
+| `SHEPR_PROJECTS` | `~/Projects` | The base folder Start new creates in and Existing folder lists. |
+| `SHEPR_STATE` | `~/.local/state/shepr` | Where paired devices, the audit log and push keys live. Files are mode 0600 in a 0700 folder. |
+| `SHEPR_LABEL` | the hostname | The name this machine shows in the app. |
+| `SHEPR_OWNER` | this machine's Tailscale login | The one login allowed in over the tailnet. |
+| `SHEPR_ALLOW_HOSTS` | none | Extra DNS names (comma separated) accepted in the Host header, for a name you put in front of `tailscale serve`. |
+| `SHEPR_URL` | the tailnet name of this machine | The address `shepr pair` prints and puts in the QR. |
+| `SHEPR_POLL` | `15` | Seconds between refreshes of herdr's state. |
+| `SHEPR_READONLY` | off | `1` turns every write off. |
+| `SHEPR_USAGE` | on | `0` turns the subscription meter off. |
+| `SHEPR_VAPID_SUB` | this repository's address | The contact the push service sees. |
+| `SHEPR_AWAIT_CLEAR_S` | `5` | How many seconds Skip and send waits for a question to close before it gives up and sends nothing. |
+
+The tests also use `SHEPR_LOCAL_ONLY`, `SHEPR_PUSH_ALLOW` and `SHEPR_USAGE_FIXTURE`. They are not for normal use.
+
 ## Honest limits
 
 - "Blocked for" is measured: herdr gives an event counter, not a clock. The host polls herdr every 15 s and
@@ -292,7 +316,7 @@ index.html app.css app.js sw.js manifest.webmanifest
 icons/               logo.svg, app icons, launch images (iOS shows these before any code runs)
 vendor/jsQR.js       the one third-party file: Safari has no BarcodeDetector. Apache-2.0, see vendor/README.md
 docs/img/            the graphics above (hand-built SVG) and real screenshots
-tests/               ui.mjs, sw_offline.mjs, format.mjs, pair_cli_test.py, usage_test.py, fake-session.sh, shots.mjs
+tests/               the UI suite (ui.mjs), the Python and node suites listed under Testing, fake-session.sh, shots.mjs
 ```
 
 State: `~/.local/state/shepr/` (`devices.json`, `seen.json`, `pairing.json`, `usage-samples.jsonl`, `sends.jsonl` audit log), mode 0600.
@@ -304,13 +328,17 @@ typed, no sheet open); inside a session it shows an **Update** button instead. I
 
 ## Testing without touching real agents
 
+The node tests need Playwright (`npm i -g playwright`; set `PW_PATH` to its `node_modules` if it lives elsewhere).
+
 ```bash
 tests/fake-session.sh up                       # isolated herdr session "hrtest" with fake agents
 eval "$(tests/fake-session.sh env)"
-export SHEPR_URL=http://localhost:8743 SHEPR_POLL=3 CLAUDE_HOME=$PWD/tests/fixtures/claude-home   # the UI test expects these fixture skills
-SHEPR_CLAUDE_CMD='echo STARTED' SHEPR_CODEX_CMD='echo CODEX' SHEPR_NEW_CMD='echo CCC' SHEPR_PROJECTS=/tmp/shepr-projects SHEPR_PUSH_ALLOW=127.0.0.1:9988 CODEX_HOME=$PWD/tests/fixtures/codex-home python3 server.py 8743 &   # what is typed when you wake a project: echoes, so tests never start a real agent
-node tests/ui.mjs; node tests/sw_offline.mjs; node tests/push_sw.mjs; node tests/format.mjs; python3 tests/pair_cli_test.py
-python3 tests/menu_parse_test.py; python3 tests/server_hardening_test.py; python3 tests/history_test.py; python3 tests/push_test.py   # pure Python, no server needed
+export SHEPR_LOCAL_ONLY=1 SHEPR_URL=http://localhost:8743 SHEPR_POLL=3   # LOCAL_ONLY: a real machine on your tailnet cannot change a result
+export CLAUDE_HOME=$PWD/tests/fixtures/claude-home CODEX_HOME=$PWD/tests/fixtures/codex-home   # fixture skills and conversations
+export SHEPR_CLAUDE_CMD='echo STARTED' SHEPR_CODEX_CMD='echo CODEX' SHEPR_NEW_CMD='echo CCC' SHEPR_PROJECTS=/tmp/shepr-projects SHEPR_PUSH_ALLOW=127.0.0.1:9988
+python3 server.py 8743 &
+node tests/ui.mjs; node tests/sw_offline.mjs; node tests/push_sw.mjs; node tests/format.mjs; node tests/draft_commit.mjs; python3 tests/pair_cli_test.py
+for t in menu_parse server_hardening history push usage ledger; do python3 tests/${t}_test.py; done   # pure Python, no server needed
 node tests/shots.mjs                           # regenerates docs/img/screens.png from the RUNNING app
 tests/fake-session.sh down
 ```

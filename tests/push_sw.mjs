@@ -3,9 +3,13 @@
 // worker and read the notification it shows. Needs the test server on :8743 started with SHEPR_PUSH_ALLOW=127.0.0.1:9988.
 import { createRequire } from 'module';
 import { execFileSync } from 'child_process';
+import fs from 'fs';
 import http from 'http';
-const require = createRequire(process.env.PW_PATH || '/home/pi/.local/share/mise/installs/npm-playwright/latest/node_modules/');
-const { chromium, devices } = require('playwright');
+// Playwright is a global install, not an npm dependency (nixweb rule). Look where a stranger would have it.
+const pw = [process.env.PW_PATH, (process.env.HOME || '') + '/.local/share/mise/installs/npm-playwright/latest/node_modules/', '/usr/local/lib/node_modules/', '/usr/lib/node_modules/']
+  .filter(Boolean).map((d) => { try { return createRequire(d)('playwright'); } catch { return null; } }).find(Boolean);
+if (!pw) { console.error('playwright not found: npm i -g playwright, or set PW_PATH to its node_modules directory'); process.exit(1); }
+const { chromium, devices } = pw;
 const BASE = 'http://localhost:8743', PUSH_PORT = 9988;
 const SERVER = new URL('../server.py', import.meta.url).pathname;
 const ENV = { ...process.env, SHEPR_STATE: process.env.SHEPR_STATE || '/tmp/claude-1000/shepr-state', SHEPR_URL: BASE,
@@ -80,7 +84,7 @@ await cdp.send('ServiceWorker.deliverPushMessage', { origin: BASE, registrationI
 await p.waitForTimeout(2500);
 const n2 = await shown();
 check('after the phone is revoked, a push shows a plain generic notice, with no names', n2.length === 1 && /needs you|Shepr/.test(n2[0].title + n2[0].body) && !/clarity|burnbar/.test(JSON.stringify(n2)));
-check('revoking removed its push subscription from the host', !JSON.parse(require('fs').readFileSync((ENV.SHEPR_STATE) + '/push.json', 'utf8'))[me]);
+check('revoking removed its push subscription from the host', !JSON.parse(fs.readFileSync((ENV.SHEPR_STATE) + '/push.json', 'utf8'))[me]);
 check('no page errors', errs.length === 0);
 if (errs.length) console.log(errs.join('\n'));
 pushSvc.close(); await b.close();

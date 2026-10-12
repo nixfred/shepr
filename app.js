@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v40';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v41';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -1453,7 +1453,8 @@ function showPlan(plan) {
 
 function commit(plan, goBtn) {
   goBtn.disabled = true; goBtn.textContent = 'Working…';
-  const sentTo = S.cur ? S.cur.host + '|' + S.cur.pane : null;
+  // The plan's target, not the session you stand in now: a push tapped while this sheet is open can have moved you.
+  const sentTo = plan.target && plan.target.host ? plan.target.host + '|' + plan.target.pane : (S.cur ? S.cur.host + '|' + S.cur.pane : null);
   post('api/send/commit', { nonce: plan.nonce }).then((r) => {
     closeSheet();
     if (plan.kind === 'new_project' || plan.kind === 'open_folder') {

@@ -423,13 +423,34 @@ def read_grok(grok_home, now_ms):
 
 
 # ---------------------------------------------------------------------------------------------------------------- Kimi
+def _env_unquote(raw):
+    """The value only. A shell comment after it is not part of the value, and a # inside quotes is."""
+    s = raw.strip()
+    if s[:1] in "\"'":
+        q, i = s[0], 1
+        while i < len(s):
+            if s[i] == "\\" and q == '"':
+                i += 2
+                continue
+            if s[i] == q:
+                return s[1:i]
+            i += 1
+        return s.strip().strip('"').strip("'")
+    out = []
+    for i, ch in enumerate(s):
+        if ch == "#" and (i == 0 or s[i - 1].isspace()):
+            break
+        out.append(ch)
+    return "".join(out).strip()
+
+
 def _env_file_key(home, name):
-    """The one named variable out of ~/.env, and nothing else."""
+    """The one named variable out of ~/.env, and nothing else. A comment on that line is not part of the value."""
     try:
         for line in (Path(home) / ".env").read_text(errors="replace").splitlines():
             m = re.match(r"^\s*(?:export\s+)?" + re.escape(name) + r"\s*=\s*(.*?)\s*$", line)
             if m:
-                return m.group(1).strip().strip('"').strip("'")
+                return _env_unquote(m.group(1))
     except OSError:
         pass
     return ""
