@@ -118,12 +118,12 @@ commands are listed: its skills are not read from here.
 The big **Start new** button at the top of the Queue opens a sheet with two tabs. **New project** (the first) makes a brand-new project. It asks for a **project name** (what shows on
 the herdr title bar) and a **folder** under `~/Projects` (suggested from the name, and refused unless it is one plain name: no
 slash, no leading dot or dash). The confirm sheet then shows the name, whether the folder will be created or already exists,
-the exact command, and what the `ccc` alias expands to on this host, and nothing happens until you confirm. Then herdr makes
+the exact command, and, when your start command is a shell alias, what it expands to on this host, and nothing happens until you confirm. Then herdr makes
 the project in the background (it does not take over your screen) and types `mkdir -p ~/Projects/<folder> && cd
-~/Projects/<folder> && ccc` into it. Override the command with `SHEPR_NEW_CMD` and the base folder with `SHEPR_PROJECTS`.
+~/Projects/<folder> && claude` into it. Override the command (an alias of your own works) with `SHEPR_NEW_CMD` and the base folder with `SHEPR_PROJECTS`.
 
 An optional **First message** gives the new project its opening task: it is appended to the command as one quoted word
-(`ccc 'fix the login bug'`), so quotes, `$`, backticks and `;` in it are just text and can never run anything. One line, up to
+(`claude 'fix the login bug'`), so quotes, `$`, backticks and `;` in it are just text and can never run anything. One line, up to
 500 characters; the confirm sheet shows it.
 
 **Existing folder** (the second tab) opens a folder you already have as a herdr project, without creating anything. The host lists the
@@ -131,7 +131,7 @@ folders directly inside `~/Projects` that herdr has no terminal in (the same pla
 with a `git` mark and when Claude or Codex last ran there. Search narrows the list. **Resume last** (the default) continues the last
 conversation in that folder and is offered only where there is one; **Fresh session** starts a new one. Tap **Claude** or **Codex** on a
 folder and the confirm sheet shows the project name, that the folder already exists and nothing in it will be created or changed, and the
-exact command (`cd ~/Projects/<folder> && ccc --continue`, or `codex resume --last`). A folder that is not there is refused: this tab never
+exact command (`cd ~/Projects/<folder> && claude --continue`, or `codex resume --last`). A folder that is not there is refused: this tab never
 runs `mkdir`. It works on the machine Shepr runs on, so other machines are not listed.
 
 ### Photos and files
@@ -265,11 +265,11 @@ preview-and-confirm sheet and run `herdr machine add|enable|disable`.
 
 ## Configuration
 
-Every setting is an environment variable on the server. Nothing needs setting for a normal install except `SHEPR_NEW_CMD` if you have no `ccc` alias.
+Every setting is an environment variable on the server. Nothing needs setting for a normal install.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `SHEPR_NEW_CMD` | `ccc` | The command typed to start a session in Start new and Existing folder. `ccc` is the author's own shell alias for Claude Code, so on any other machine set this to `claude` or your own alias. |
+| `SHEPR_NEW_CMD` | `claude` | The command typed to start a session in Start new and Existing folder. Point it at a shell alias of your own to add flags, for example one that runs `claude` with your preferred options. |
 | `SHEPR_CLAUDE_CMD` / `SHEPR_CODEX_CMD` | `claude` / `codex` | The commands typed to wake a sleeping Claude or Codex project. |
 | `SHEPR_PROJECTS` | `~/Projects` | The base folder Start new creates in and Existing folder lists. |
 | `SHEPR_STATE` | `~/.local/state/shepr` | Where paired devices, the audit log and push keys live. Files are mode 0600 in a 0700 folder. |

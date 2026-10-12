@@ -145,7 +145,7 @@ srv.run_herdr = lambda machine, args, timeout=10, want_json=True: {"result": {"w
 p1 = srv.plan_new_project({"host": "gus", "name": "N", "dir": "d", "message": "it's fine"})
 p2 = srv.plan_new_project({"host": "gus", "name": "N", "dir": "d"})
 c1 = next(l["v"] for l in p1["lines"] if l["k"] == "Then types"); c2 = next(l["v"] for l in p2["lines"] if l["k"] == "Then types")
-check("first message: it is appended to the command, quoted; with none, the command is unchanged", c1.endswith("ccc 'it'\"'\"'s fine'") and c2.endswith("&& ccc") and any(l["k"] == "First message" for l in p1["lines"]) and not any(l["k"] == "First message" for l in p2["lines"]))
+check("first message: it is appended to the command, quoted; with none, the command is unchanged", c1.endswith("claude 'it'\"'\"'s fine'") and c2.endswith("&& claude") and any(l["k"] == "First message" for l in p1["lines"]) and not any(l["k"] == "First message" for l in p2["lines"]))
 for bad in ("two\nlines", "x" * 501, "bell\x07", 5):
     try: srv.plan_new_project({"host": "gus", "name": "N", "dir": "d", "message": bad}); refused = False
     except srv.HerdrError as e: refused = e.code == "bad_message"
@@ -491,6 +491,13 @@ check("open folder: a folder that is not there is never created, it is refused",
 check("open folder: a bad mode, agent or name is refused", opf(dir="plain", mode="x") == "bad_mode" and opf(dir="plain", mode="fresh", agent="gpt") == "bad_agent"
       and opf(dir="plain", mode="fresh", name="a\nb") == "bad_name" and opf(dir="plain", mode="fresh", name="x" * 61) == "bad_name")
 check("open folder: resuming where nothing is recorded is refused, for Claude and for Codex", opf(dir="plain", mode="continue") == "nothing_to_resume" and opf(dir="plain", mode="continue", agent="codex") == "nothing_to_resume")
+check("start command: the default is plain claude, so a stranger with no ccc alias works (ccc is the author's own alias)", srv.NEW_CMD == "claude" and srv.CODEX_CMD == "codex")
+_h = tempfile.mkdtemp(); _old_home = os.environ.get("HOME"); os.environ["HOME"] = _h
+try:
+    open(os.path.join(_h, ".bashrc"), "w").write("alias zz='claude --some-flag'\nalias other='ls'\n")
+    check("start command: a shell alias of your own is explained on the confirm sheet, a plain command is not", srv.alias_expansion("zz") == "claude --some-flag" and srv.alias_expansion("claude") is None)
+finally:
+    os.environ["HOME"] = _old_home if _old_home is not None else ""; shutil.rmtree(_h, ignore_errors=True)
 srv.NEW_CMD, srv.CODEX_CMD = "ccc", "codex"
 cases = {("has-history", "continue", "claude"): f"cd {froot}/has-history && ccc --continue", ("plain", "fresh", "claude"): f"cd {froot}/plain && ccc",
          ("with-git", "continue", "codex"): f"cd {froot}/with-git && codex resume --last", ("plain", "fresh", "codex"): f"cd {froot}/plain && codex"}

@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v41';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v42';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -520,7 +520,7 @@ function paintMain() {
   if (S.tab !== 'subs') BUD.fresh = true;   // the Subs page animates in each time you arrive, not on every refresh
   if (S.tab === 'waiting') {
     const w = waiting(), d = finished(), ds = finishedSeen(), sl = sleeping(), wk = working();
-    if (S.q && S.q.writes) {   // the one big button: a brand-new project (name, folder, ccc)
+    if (S.q && S.q.writes) {   // the one big button: a brand-new project (name, folder, the start command)
       const nb = btn('', 'newbig', openNewProject); nb.id = 'newproject';
       nb.append(el('span', 'plus', '+'), el('span', 'lbl', 'Start new'), el('span', 'sub2', 'a new project'));
       m.append(nb);
@@ -1243,7 +1243,7 @@ function openGoTo(prefill) {
 }
 
 // ---- Start new: a brand-new project. Ask for the name that goes on the herdr title bar and the folder under ~/Projects,
-// then (after you confirm) herdr makes the project, the folder is made, and ccc is started in it.
+// then (after you confirm) herdr makes the project, the folder is made, and the start command is typed in it.
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
 const DIR_OK = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 function openNewProject() {
@@ -1258,7 +1258,7 @@ function openNewProject() {
     tab = t; store.set('shepr.newtab', t);
     bNew.classList.toggle('on', t === 'new'); bOld.classList.toggle('on', t === 'existing');
     body.textContent = '';
-    if (t === 'new') { sub.textContent = 'Makes a new herdr project, creates its folder in ~/Projects, and starts ccc in it. You confirm first.'; newProjectForm(body, first); }
+    if (t === 'new') { sub.textContent = 'Makes a new herdr project, creates its folder in ~/Projects, and starts Claude in it. You confirm first.'; newProjectForm(body, first); }
     else { sub.textContent = 'Opens a folder you already have as a herdr project. Nothing in it is created or changed. You confirm first.'; existingFolderPicker(body); }
   };
   openSheet(box);

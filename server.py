@@ -1763,9 +1763,9 @@ def commit_start(plan):
 
 
 # --------------------------------------------------------------------------------------------
-# a NEW project: a new herdr workspace (its title-bar name), a folder under ~/Projects, and `ccc` started in it
+# a NEW project: a new herdr workspace (its title-bar name), a folder under ~/Projects, and the start command (SHEPR_NEW_CMD) typed in it
 # --------------------------------------------------------------------------------------------
-NEW_CMD = os.environ.get("SHEPR_NEW_CMD", "ccc")              # what is typed to start the session (an alias on Fred's hosts)
+NEW_CMD = os.environ.get("SHEPR_NEW_CMD", "claude")           # what is typed to start the session; a shell alias of your own works too (set SHEPR_NEW_CMD in the service)
 PROJECTS_DIR = os.environ.get("SHEPR_PROJECTS", "~/Projects")   # where project folders live (tests point it at /tmp)
 DIR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")      # one plain folder name: no slash, no leading dot or dash
 
@@ -1817,7 +1817,7 @@ def plan_new_project(body):
     if msg:
         lines.append(("First message", msg))
     lines.append(("Then types", cmd))
-    ex = alias_expansion(NEW_CMD) if host["kind"] == "local" and NEW_CMD == "ccc" else None
+    ex = alias_expansion(NEW_CMD) if host["kind"] == "local" else None
     if ex:
         lines.append((f"{NEW_CMD} runs", ex))
     lines.append(("Note", "makes a new herdr project in the background (it will not take over your screen), then types that command into it."))
@@ -1947,7 +1947,7 @@ def plan_open_folder(body):
     except (HerdrError, KeyError, TypeError):
         pass
     lines.append(("Then types", cmd))
-    ex = alias_expansion(NEW_CMD) if agent == "claude" and NEW_CMD == "ccc" else None
+    ex = alias_expansion(NEW_CMD) if agent == "claude" else None
     if ex:
         lines.append((f"{NEW_CMD} runs", ex))
     lines.append(("Note", "makes a new herdr project in the background (it will not take over your screen), then types that command into it."))
