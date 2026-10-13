@@ -2781,6 +2781,7 @@ def cli_pair(a):
                    "created": int(time.time()), "used_by": None})
     url = f"{info['url']}/#shepr-pair={shown}"
     png = a.png
+    own_png = png is True   # the picture is ours (the private directory), so wait mode removes it when the code is done
     if png:
         if not shutil.which("qrencode"):
             sys.exit("shepr: --png needs qrencode (not installed)")
@@ -2819,6 +2820,9 @@ def cli_pair(a):
             time.sleep(0.5)
     except KeyboardInterrupt:
         pass
+    finally:
+        if own_png:   # paired, expired or cancelled: the code is dead, so is the picture of it (--no-wait leaves it for the caller)
+            forget_qr_pictures()
     try:
         os.remove(pairing_path())
     except OSError:

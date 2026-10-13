@@ -173,6 +173,55 @@ check("pair --cancel: the fallback picture is gone too", r.returncode == 0 and p
 r = subprocess.run([sys.executable, "-I", SERVER, "pair", "--cancel"], env=env, capture_output=True, text=True, timeout=60)
 check("pair --cancel with nothing waiting still succeeds", r.returncode == 0 and "no pairing code" in r.stdout, (r.returncode, r.stdout, r.stderr))
 
+# 12b. wait mode (no --no-wait): the picture of a dead code does not outlive it. The plugin runs --no-wait, a person at a
+# terminal may not. Paired, Ctrl-C and a picture the user named themselves are the three ways it ends.
+import signal
+
+
+def wait_pair(w, *args):
+    env = {"PATH": w["fake"] + ":/usr/bin:/bin", "HOME": w["home"], "SHEPR_STATE": w["state"], "SHEPR_LOCAL_ONLY": "1",
+           "SHEPR_URL": "http://127.0.0.1:1", "QR_LOG": w["log"]}
+    p = subprocess.Popen([sys.executable, "-I", SERVER, "pair", "--json", "--ttl", "30", *args], env=env, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True)
+    try:
+        return p, json.loads(p.stdout.readline())   # the --json line is printed before it starts waiting
+    except ValueError:
+        p.kill(); p.wait()
+        return p, {}
+
+
+def finish(p, how):
+    if how == "sigint":
+        p.send_signal(signal.SIGINT)
+    try:
+        p.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        p.kill(); p.wait()
+        return None
+    return p.returncode
+
+
+w = world()
+p, out = wait_pair(w, "--png"); png = out.get("png") or ""
+alive = bool(png) and os.path.isfile(png)
+pf = os.path.join(w["state"], "pairing.json"); d = json.load(open(pf)); d["used_by"] = "phone-1"; json.dump(d, open(pf, "w"))
+rc = finish(p, "paired")
+check("wait mode, phone pairs: the private picture existed while waiting", alive, out)
+check("wait mode, phone pairs: exit 0 and the picture is gone", rc == 0 and not os.path.exists(png), (rc, png))
+
+w = world()
+p, out = wait_pair(w, "--png"); png = out.get("png") or ""
+alive = bool(png) and os.path.isfile(png)
+rc = finish(p, "sigint")
+check("wait mode, Ctrl-C: the private picture existed while waiting", alive, out)
+check("wait mode, Ctrl-C: exit 1, the picture and the code are gone", rc == 1 and not os.path.exists(png) and not os.path.exists(os.path.join(w["state"], "pairing.json")), (rc, png))
+
+w = world(); mine = os.path.join(w["root"], "mine.png")
+p, out = wait_pair(w, "--png", mine)
+alive = os.path.isfile(mine)
+rc = finish(p, "sigint")
+check("wait mode with --png FILE: a picture the user named stays (it is theirs)", alive and rc == 1 and os.path.isfile(mine), (rc, out))
+
 # 13. the plugin itself: no /tmp fallback, no secret in an argument, no rm
 qml = open(os.path.join(HERE, "..", "Service.qml")).read()
 check("Service.qml: no /tmp fallback and no hand-built picture path", '"/tmp"' not in qml and "pairPngPath" not in qml and "runtimeDir" not in qml)
