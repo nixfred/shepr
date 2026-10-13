@@ -2186,8 +2186,12 @@ def dispatch_push(events):
     """A blocked or finished agent was just seen. Tell every phone that asked for that kind of news, at most once per
     PUSH_MIN_GAP_S each (the phone looks at the whole queue anyway, so one push covers any number of changes)."""
     kinds = set(events)
+    devs = devices()
     with LOCK:
-        targets = [(d, e) for d, e in PUSH.items() if any((e.get("prefs") or {}).get(k) for k in kinds)]
+        gone = [d for d in PUSH if d not in devs]   # revoked by `shepr revoke`, another process that cannot reach this PUSH
+        targets = [(d, e) for d, e in PUSH.items() if d in devs and any((e.get("prefs") or {}).get(k) for k in kinds)]
+    for dev_id in gone:
+        forget_push(dev_id)
     for dev_id, _e in targets:
         if time.time() - PUSH_LAST.get(dev_id, 0) < PUSH_MIN_GAP_S:
             continue

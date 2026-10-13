@@ -76,6 +76,7 @@ STATUS["code"], STATUS["location"] = 201, None
 
 # ---- who gets told what
 srv.PUSH.clear(); srv.PUSH_LAST.clear()
+srv.mutate_devices(lambda devs: devs.update({n: {"name": n, "x": "", "y": ""} for n in ("A", "B", "C")}))   # only a paired phone can subscribe
 for dev, prefs in (("A", {"blocked": True, "done": False}), ("B", {"blocked": False, "done": True}), ("C", {"blocked": False, "done": False})):
     srv.push_subscribe(dev, {"subscription": {"endpoint": EP + "/" + dev, "keys": {}}, "prefs": prefs})
 GOT.clear(); srv.dispatch_push(["blocked"]); who1 = sorted(g["path"][-1] for g in GOT)
@@ -103,4 +104,14 @@ check("poller: a new blocked state and a new finished state, once each, are", ne
 # ---- a revoked phone stops getting pushes
 srv.forget_push("A")
 check("revoke: forgetting a device removes its subscription from disk too", "A" not in json.load(open(srv.state_path("push.json"))))
+# `shepr revoke` runs in ANOTHER process: it edits devices.json and push.json, never this server's PUSH in memory
+srv.push_subscribe("B", {"subscription": {"endpoint": EP + "/B", "keys": {}}, "prefs": {"blocked": True, "done": True}})
+cli = ("import argparse, importlib.util; s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+       "s.loader.exec_module(m); m.cli_revoke(argparse.Namespace(who='B'))" % os.path.join(here, "..", "server.py"))
+import subprocess
+rv = subprocess.run([sys.executable, "-c", cli], capture_output=True, text=True)
+GOT.clear(); srv.PUSH_LAST.clear(); srv.dispatch_push(["blocked", "done"])
+check("revoke from the CLI: the revoked phone gets no more pushes from the running server", rv.returncode == 0 and not any(g["path"].endswith("/B") for g in GOT))
+srv.push_subscribe("C", {"subscription": {"endpoint": EP + "/C", "keys": {}}, "prefs": {"blocked": True, "done": False}})
+check("revoke from the CLI: a later save by the server does not write the revoked phone's subscription back", "B" not in json.load(open(srv.state_path("push.json"))))
 sys.exit(0 if ok else 1)
