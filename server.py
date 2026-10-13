@@ -823,7 +823,12 @@ def build_plan(body):
             nav = _nav(cur, act["idx"]) + ["enter"]
             keys += nav
             steps.append({"op": "keys", "keys": nav})
-        approves = any(tick[n]["approves"] and n in want for n in flip)
+        # This send approves when it ticks an approving box, or when it submits with one left ticked: an approval that is
+        # already ticked is not in `flip`, so judging the flips alone would send "Yes" through Submit without the warning.
+        # Unticking an approval never warns. Ticks that cannot be toggled here (a checked "Type something", a row above 9) count.
+        final_on = set(want) | {o["n"] for o in menu["options"] if o["checked"] and o["n"] not in tick}
+        approving = {o["n"] for o in menu["options"] if o["approves"]}
+        approves = bool({n for n in flip if n in want} & approving) or (advance and bool(final_on & approving))
         on = [f"{n}. {tick[n]['label']}" for n in flip if n in want]
         off = [f"{n}. {tick[n]['label']}" for n in flip if n not in want]
         lines = ([("Ticks", ", ".join(on))] if on else []) + ([("Unticks", ", ".join(off))] if off else []) + ([("Types", text)] if text else []) + \

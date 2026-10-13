@@ -114,6 +114,19 @@ plan = srv.build_plan({"host": "gus", "pane": "w1:p1", "kind": "multi", "picks":
 kept = next(l["v"] for l in plan["lines"] if l["k"] == "Leaves ticked")
 check("multi: a checked 'Type something' row is disclosed, not hidden", "Type something" in kept and "cannot be changed" in kept)
 
+# ---- multi-select: "This approves it" follows what the send leaves ticked, not only what it changes
+YES_ON = "Allow these?\n\n❯ 1. [✔] Yes, allow it\n  2. [ ] No\n  3. [ ] Maybe later\n     Submit\n─────────\n  4. Chat about this\n"
+YES_OFF = YES_ON.replace("[✔] Yes", "[ ] Yes")
+def _multi_approves(screen, picks, advance=True):
+    srv.read_tail = lambda host, pane, lines: screen
+    return srv.build_plan({"host": "gus", "pane": "w1:p1", "kind": "multi", "picks": picks, "advance": advance})["approves"]
+check("multi approves: ticking Yes warns", _multi_approves(YES_OFF, [1]) is True)
+check("multi approves: submitting with Yes already ticked and kept still warns", _multi_approves(YES_ON, [1]) is True)
+check("multi approves: submitting with Yes already ticked while ticking another box still warns", _multi_approves(YES_ON, [1, 3]) is True)
+check("multi approves: unticking Yes does not warn", _multi_approves(YES_ON, [3]) is False and _multi_approves(YES_ON, []) is False)
+check("multi approves: a tick that is not sent (advance off) keeps the old rule, Yes already ticked and left alone does not warn", _multi_approves(YES_ON, [1, 3], advance=False) is False)
+check("multi approves: ticking a non-approving box on a screen with no approval does not warn", _multi_approves(YES_OFF, [2]) is False)
+
 # ---- uploads from the phone: what a file really is, where it is stored, and how it is cleaned up
 PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 50
 check("upload: a PNG, JPEG, GIF, WEBP and PDF are recognised by their first bytes, whatever the phone calls them",
