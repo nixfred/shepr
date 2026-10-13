@@ -723,4 +723,32 @@ check("signature: a timestamp too large for a float is a bad signature, not a cr
       err_code(lambda: srv.verify_request({"X-Shepr-Device": "odd1", "X-Shepr-Ts": "9" * 400, "X-Shepr-Nonce": "n" * 10, "X-Shepr-Sig": "AA"}, "GET", "/api/queue", b"")) == "bad_signature")
 check("wake: a target that is not an object is refused, not a crash", err_code(lambda: srv.plan_wake({"text": "hi", "targets": ["w1:p1"]})) == "bad_targets")
 
+# ---- `shepr revoke` from another process lands in the SAME clock tick as the server's own save: the mtime alone does not
+# move, so the revoked phone would stay authorized until the next write. The inode (os.replace makes a new one) does move.
+srv.mutate_devices(lambda devs: devs.__setitem__("tickdev", {"name": "tick", **{k: pub(5)[k] for k in ("x", "y")}}))
+check("same-tick revoke: the device is authorized before", "tickdev" in srv.devices())
+dpath = srv.state_path("devices.json"); st = os.stat(dpath)
+with open(dpath + ".cli", "w") as f: json.dump({}, f)
+os.replace(dpath + ".cli", dpath); os.utime(dpath, ns=(st.st_atime_ns, st.st_mtime_ns))   # the same mtime, to the nanosecond
+check("same-tick revoke: the server sees it at once, with the mtime unchanged", "tickdev" not in srv.devices())
+
+# ---- `shepr pair` and `pair --cancel` write pairing.json under the state lock, as the server does while a phone redeems a
+# code (both use pairing.json.tmp): with the lock held they wait, and they finish once it is released.
+import fcntl
+pdir = tempfile.mkdtemp()
+with open(os.path.join(pdir, "server.json"), "w") as f: json.dump({"pid": os.getpid(), "url": "http://localhost:1"}, f)
+penv = dict(os.environ, SHEPR_STATE=pdir, SHEPR_URL="http://localhost:1")
+for args, what in ((["pair", "--no-wait", "--json"], "pair"), (["pair", "--cancel"], "pair --cancel")):
+    lk = open(os.path.join(pdir, ".lock"), "a"); fcntl.flock(lk, fcntl.LOCK_EX)    # a redeem in progress
+    before = os.path.exists(os.path.join(pdir, "pairing.json"))
+    p = subprocess.Popen([sys.executable, os.path.join(here, "..", "server.py"), *args], env=penv,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(1.5)
+    waited = p.poll() is None and os.path.exists(os.path.join(pdir, "pairing.json")) == before
+    fcntl.flock(lk, fcntl.LOCK_UN); lk.close()
+    out, err = p.communicate(timeout=15)
+    check(f"{what}: waits while the server holds the state lock", waited)
+    check(f"{what}: then finishes (exit 0) and leaves pairing.json {'written' if what == 'pair' else 'removed'}",
+          p.returncode == 0 and os.path.exists(os.path.join(pdir, "pairing.json")) == (what == "pair"))
+
 sys.exit(0 if ok else 1)

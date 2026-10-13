@@ -1095,7 +1095,7 @@ def fingerprint(x, y):
 
 
 DEVICES = {}
-_dev_mtime = [None]
+_dev_stamp = [None]
 NONCES = {}
 PAIR_FAILS = []
 AUTH_ERR = {"unpaired": 401, "unknown_device": 401, "bad_signature": 401, "stale": 401, "replay": 401,
@@ -1116,20 +1116,27 @@ def http_status(code):
     return 400
 
 
+def _dev_file_stamp():
+    """What says devices.json changed. The mtime alone misses a `shepr revoke` that lands in the same clock tick as the
+    server's own save; every save is an os.replace, which makes a new inode, so the inode and size are compared too."""
+    try:
+        st = os.stat(state_path("devices.json"))
+        return (st.st_mtime_ns, st.st_ino, st.st_size)
+    except OSError:
+        return None
+
+
 def devices():
     """The authorized devices, reloaded whenever the file changes (so `shepr revoke` takes effect now)."""
-    try:
-        mt = os.path.getmtime(state_path("devices.json"))
-    except OSError:
-        mt = None
+    stamp = _dev_file_stamp()
     with LOCK:
-        if mt != _dev_mtime[0]:
+        if stamp != _dev_stamp[0]:
             try:
                 with open(state_path("devices.json")) as f:
                     DEVICES.clear(); DEVICES.update(json.load(f))
             except (OSError, ValueError):
                 DEVICES.clear()
-            _dev_mtime[0] = mt
+            _dev_stamp[0] = stamp
         return DEVICES
 
 
@@ -1147,7 +1154,7 @@ def state_lock():
 
 
 def _mutate_devices_locked(fn):
-    _dev_mtime[0] = None          # force a reload from disk: never write back what another process already changed
+    _dev_stamp[0] = None          # force a reload from disk: never write back what another process already changed
     r = fn(devices())
     save_devices()
     return r
@@ -1165,7 +1172,7 @@ def save_devices():
         json.dump(DEVICES, f, indent=1)
     os.chmod(tmp, 0o600)
     os.replace(tmp, state_path("devices.json"))
-    _dev_mtime[0] = os.path.getmtime(state_path("devices.json"))
+    _dev_stamp[0] = _dev_file_stamp()
 
 
 def dev_xy(d):
@@ -2792,7 +2799,8 @@ def cli_pair(a):
     if a.cancel:   # drop a code that is still waiting to be used (the bar widget's Cancel button); needs no server
         forget_qr_pictures()   # the QR holds that code: it goes with it
         try:
-            os.remove(pairing_path())
+            with state_lock():   # not halfway through a phone redeeming it
+                os.remove(pairing_path())
             print("pairing code cancelled")
         except OSError:
             print("no pairing code was waiting")
@@ -2803,8 +2811,9 @@ def cli_pair(a):
     code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(12))
     shown = "-".join(code[i:i + 4] for i in range(0, 12, 4))
     ttl = max(30, min(900, a.ttl))
-    write_pairing({"hash": hashlib.sha256(code.encode()).hexdigest(), "expires": time.time() + ttl,
-                   "created": int(time.time()), "used_by": None})
+    with state_lock():   # the server redeems under this lock and writes the same temp file: never both at once
+        write_pairing({"hash": hashlib.sha256(code.encode()).hexdigest(), "expires": time.time() + ttl,
+                       "created": int(time.time()), "used_by": None})
     url = f"{info['url']}/#shepr-pair={shown}"
     png = a.png
     own_png = png is True   # the picture is ours (the private directory), so wait mode removes it when the code is done
