@@ -68,7 +68,37 @@ try:
     rr = usage.parse_claude_usage(hostile); check("claude: hostile numbers and text never crash, are clamped to 0..1, and labels are capped", all(0 <= l["used"] <= 1 and len(l["label"]) <= 40 for l in rr))
 except Exception as e:
     check("claude: hostile payload crashed: %r" % e, False)
-check("claude: the token only ever goes to https, never over a redirect or plain http", True)
+# A real HTTPS stand-in on 127.0.0.1 (a throwaway self-signed cert) that redirects to a second server: the redirect is not
+# followed, so the second server never sees the token. (This line was `check(..., True)`, which tested nothing.)
+import http.server, shutil, ssl, subprocess, threading
+if shutil.which("openssl"):
+    cd = tmp(); seen = []
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "1",
+                    "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1", "-keyout", cd + "/k.pem", "-out", cd + "/c.pem"],
+                   check=True, capture_output=True)
+    class Hop(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self):
+            seen.append((self.server.server_port, self.path, self.headers.get("Authorization")))
+            if self.path == "/first":
+                self.send_response(302); self.send_header("Location", "https://127.0.0.1:%d/second" % srv2.server_port)
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", "0"); self.end_headers()
+    sctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); sctx.load_cert_chain(cd + "/c.pem", cd + "/k.pem")
+    srv1, srv2 = (http.server.ThreadingHTTPServer(("127.0.0.1", 0), Hop) for _ in range(2))
+    for s_ in (srv1, srv2):
+        s_.socket = sctx.wrap_socket(s_.socket, server_side=True); threading.Thread(target=s_.serve_forever, daemon=True).start()
+    old_ca = os.environ.get("SSL_CERT_FILE"); os.environ["SSL_CERT_FILE"] = cd + "/c.pem"
+    try:
+        st_, _, _ = usage.https_get("https://127.0.0.1:%d/first" % srv1.server_port, {"Authorization": "Bearer " + SECRET}, 5)
+    finally:
+        os.environ.pop("SSL_CERT_FILE") if old_ca is None else os.environ.__setitem__("SSL_CERT_FILE", old_ca)
+        srv1.shutdown(); srv2.shutdown()
+    check("claude: the token never follows a redirect (the 302 comes back, the second server sees nothing)",
+          st_ == 302 and [p_ for p_, _, _ in seen] == [srv1.server_port] and seen[0][2] == "Bearer " + SECRET)
+else:
+    print("SKIP claude: redirect check needs openssl for a throwaway certificate")
 try:
     usage.https_get("http://api.anthropic.com/api/oauth/usage", {}, 1); check("https_get refuses plain http", False)
 except ValueError:
