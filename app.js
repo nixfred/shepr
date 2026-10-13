@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v42';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v43';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -1508,14 +1508,14 @@ function prepare(body) {
 }
 const SKIPPABLE = ['menu_text', 'blocked_text'];
 function openSkipSheet(text) {
-  const box = el('div', 'skipsheet');
-  box.append(el('h3', null, 'A question is waiting'),
+  const box = el('div', 'skipsheet'), mid = el('div', 'skipmid');   // the words scroll on a short screen; the buttons stay on screen
+  mid.append(el('h3', null, 'A question is waiting'),
              el('div', 'sub', 'Your words cannot be typed into it: a numbered question reads typed characters as keystrokes. Your message stays in the box either way.'));
   const quote = el('div', 'skipmsg selectable'); quote.textContent = text;   // your own words, as text
-  box.append(quote, el('div', 'sub', 'Or skip the question. Shepr presses Esc to close it without answering anything, then sends your message as a normal prompt. You review it first.'));
+  mid.append(quote, el('div', 'sub', 'Or skip the question. Shepr presses Esc to close it without answering anything, then sends your message as a normal prompt. You review it first.'));
   const row = el('div', 'btns');
   row.append(btn('Answer it first', '', closeSheet), btn('Skip and send\u2026', 'go', () => { closeSheet(); prepare({ kind: 'text', text, skip: true }); }));
-  box.append(row);
+  box.append(mid, row);
   openSheet(box);
 }
 

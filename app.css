@@ -303,7 +303,12 @@ button{font:inherit;color:inherit}
 /* ---- pairing screen ---- */
 .pair{position:absolute;inset:0;z-index:50;background:radial-gradient(120% 80% at 50% 0%,#0d2233 0%,#070d14 55%,#04070b 100%);
   display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;
-  padding:calc(max(var(--top), 44px) + var(--topx, 18px) + 14px) 22px calc(var(--bottom) + 22px)}
+  padding:calc(max(var(--top), 44px) + var(--topx, 18px) + 14px) 22px calc(var(--bottom) + 22px);
+  /* WHY: on a 320x568 phone this column was ~670px tall and the Pair button sat below the fold, unreachable on a page
+     that never scrolls. Short screens drop the artwork (below) so it fits; the column itself may scroll as a last resort
+     (keyboard up, an error line), a box scrolling in place, never the page. */
+  overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
+@media (max-height:640px){.pair{gap:8px}.pair .pgfx{display:none}.pair h2{font-size:22px}}
 .pair[hidden]{display:none}
 .pgfx{width:min(320px,86%);flex:0 0 auto}
 .pgfx rect,.pgfx path{fill:none;stroke:var(--accent);stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
@@ -471,6 +476,9 @@ button{font:inherit;color:inherit}
 
 /* WHY: a sheet's content must be a flex child that can shrink, or a tall list pushes its own buttons off the bottom of the screen. */
 .sheet>div{display:flex;flex-direction:column;flex:1 1 auto;min-height:0}
+/* The skip sheet has no list, so its words are the part that scrolls: with the keyboard up on a small phone its buttons sat below the visible area. */
+.skipmid{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
+.skipsheet>.btns{flex:0 0 auto}
 
 .htag{margin-left:8px;font-size:13px;font-weight:700;color:var(--dim);letter-spacing:.3px}
 
