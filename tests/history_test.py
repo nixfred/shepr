@@ -58,6 +58,24 @@ e, nxt, size, note = srv.history_page(path, 0)
 check("asking from offset 0 returns nothing and says it is done", e == [] and nxt is None)
 e, nxt, size, note = srv.history_page(path, 10 ** 12)
 check("an offset past the end is treated as the end", e == pages[0] and nxt == (None if len(pages) == 1 else nxt))
+# one line bigger than the cap sits between two small ones: paging walks past it and still reaches the oldest message
+_cap = srv.HIST_LINE; srv.HIST_LINE = 300_000      # above one 256 KB read window, below the 600 KB line
+try:
+    big = os.path.join(d, "big.jsonl")
+    with open(big, "wb") as f:
+        for r in (line("user", 1), line("asst", 2, 600_000), line("user", 3)): f.write(json.dumps(r).encode() + b"\n")
+    seen, offs, before = [], [], None
+    while len(offs) < 50:
+        entries, nxt, size, note = srv.history_page(big, before)
+        seen += [e["x"] for e in entries]; offs.append(nxt)
+        if nxt is None: break
+        if before is not None and nxt >= before: break      # paging must always move backwards
+        before = nxt
+    check("a line bigger than the cap does not hide the messages before it",
+          any(x.startswith("question 1 ") for x in seen) and any(x.startswith("question 3 ") for x in seen) and offs[-1] is None)
+    check("paging past that line moves strictly backwards and ends", len(offs) < 50 and all(a > b for a, b in zip(offs[:-2], offs[1:-1])))
+finally:
+    srv.HIST_LINE = _cap
 # a transcript path must never be built from a hostile session id
 for bad in ("../x", "a/b", "", None, "x" * 5 + "\x00"):
     check(f"session id {bad!r} is refused", srv.transcript_file({"agent_session": {"agent": "claude", "kind": "id", "value": bad}}) is None)

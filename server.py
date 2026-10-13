@@ -328,7 +328,10 @@ def history_page(path, before):
             if pos > 0:                      # the first piece is the tail of a line that began earlier
                 carry, parts, off = parts[0], parts[1:], pos + len(parts[0]) + 1
                 if len(carry) > HIST_LINE:
-                    note, oldest, carry = "an entry too large to show was skipped here", 0, b""
+                    # Still inside a line too long to show. `pos` is the earliest byte read and lies before where this page
+                    # began, so the next page walks further back. Offset 0 would tell the phone the session starts here and
+                    # hide every message older than this line.
+                    note, oldest, carry = "an entry too large to show was skipped here", pos, b""
                     break
             else:
                 carry, off = b"", 0
