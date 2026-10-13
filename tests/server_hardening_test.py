@@ -710,5 +710,17 @@ check("multi: ticks made for one question are not sent to a different question w
       commit_on(T_A, T_B, {"kind": "multi", "picks": [1, 2], "advance": True}) == "moved_on" and sent_q2 == [])
 check("multi: the same question still gets the ticks and Submit",
       commit_on(T_A, T_A, {"kind": "multi", "picks": [1, 2], "advance": True}) is None and [s["keys"] for s in sent_q2] == [["1"], ["2"], ["down", "down", "enter"]])
+# ---- malformed input gets an error reply, not an exception that drops the connection (/api/pair needs no signature)
+srv.mutate_devices(lambda devs: devs.__setitem__("odd1", {"name": "odd", "x": "AA", "y": "AA"}))
+def err_code(fn):
+    try: fn(); return None
+    except srv.HerdrError as e: return e.code
+    except Exception as e: return type(e).__name__
+srv.PAIR_FAILS.clear()
+check("pair: a jwk that is a list or a string is a bad key, not a crash",
+      err_code(lambda: srv.do_pair({"code": "x", "jwk": [1]}, "ua")) == "bad_key" and err_code(lambda: srv.do_pair({"code": "x", "jwk": "EC"}, "ua")) == "bad_key")
+check("signature: a timestamp too large for a float is a bad signature, not a crash",
+      err_code(lambda: srv.verify_request({"X-Shepr-Device": "odd1", "X-Shepr-Ts": "9" * 400, "X-Shepr-Nonce": "n" * 10, "X-Shepr-Sig": "AA"}, "GET", "/api/queue", b"")) == "bad_signature")
+check("wake: a target that is not an object is refused, not a crash", err_code(lambda: srv.plan_wake({"text": "hi", "targets": ["w1:p1"]})) == "bad_targets")
 
 sys.exit(0 if ok else 1)

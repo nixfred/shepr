@@ -1189,7 +1189,7 @@ def verify_request(headers, method, target, body):
     try:
         t = int(ts) / 1000.0
         sigb = b64u_dec(sig)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):   # OverflowError: a timestamp too large for a float
         raise HerdrError("bad_signature", "malformed signature")
     if abs(time.time() - t) > 90:
         raise HerdrError("stale", "request is too old or the phone clock is off")
@@ -1256,7 +1256,7 @@ def do_pair(body, ua):
     code = norm_code(body.get("code", ""))
     jwk = body.get("jwk") or {}
     try:
-        if jwk.get("kty") != "EC" or jwk.get("crv") != "P-256":
+        if not isinstance(jwk, dict) or jwk.get("kty") != "EC" or jwk.get("crv") != "P-256":
             raise ValueError
         x, y = int.from_bytes(b64u_dec(jwk["x"]), "big"), int.from_bytes(b64u_dec(jwk["y"]), "big")
         if not on_curve(x, y):
@@ -1991,6 +1991,8 @@ def plan_wake(body):
         raise HerdrError("bad_targets", f"pick 1 to {WAKE_MAX} sessions")
     items, seen = [], set()
     for t in targets:
+        if not isinstance(t, dict):
+            raise HerdrError("bad_targets", f"pick 1 to {WAKE_MAX} sessions")
         hid, pane = str(t.get("host", "")), str(t.get("pane", ""))
         if not PANE_RE.match(pane):
             raise HerdrError("bad_pane", "not a pane id")
