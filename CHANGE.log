@@ -1,6 +1,13 @@
 Shepr change log. Newest first.
 Every outside contribution is listed with the contributor's GitHub profile and, when one could be verified, their X profile.
 
+2026-10-12  v42 (1b97a6d)  HANCORE  https://github.com/HANCORE-linux
+  X: https://x.com/hancore_linux (listed on their GitHub profile, checked 2026-10-13)
+  Review of the Omarchy plugin for the marketplace (omacom/omarchy-plugin-marketplace#11176): the one-time pairing code
+  was passed to qrencode as an argument, where `ps` could show it, and the QR picture could fall back to /tmp with default
+  permissions. Fixed in 1b97a6d: the code goes over stdin, the picture is born 0600 in a private directory the CLI checks
+  first, never /tmp, and Cancel removes it. v43 also removes it when `shepr pair` finishes waiting.
+
 2026-10-10  v38  Jordan Partridge  https://github.com/jordanpartridge
   X: none found (checked 2026-10-10: GitHub lists no X account, only LinkedIn, and his site links none)
   #1  A session herdr no longer has is left, not polled. herdr answers agent_not_found, Shepr used to turn that into HTTP 400,

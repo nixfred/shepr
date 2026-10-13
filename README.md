@@ -363,8 +363,8 @@ export SHEPR_LOCAL_ONLY=1 SHEPR_URL=http://localhost:8743 SHEPR_POLL=3   # LOCAL
 export CLAUDE_HOME=$PWD/tests/fixtures/claude-home CODEX_HOME=$PWD/tests/fixtures/codex-home   # fixture skills and conversations
 export SHEPR_CLAUDE_CMD='echo STARTED' SHEPR_CODEX_CMD='echo CODEX' SHEPR_NEW_CMD='echo CCC' SHEPR_PROJECTS=/tmp/shepr-projects SHEPR_PUSH_ALLOW=127.0.0.1:9988
 python3 server.py 8743 &
-node tests/ui.mjs; node tests/sw_offline.mjs; node tests/push_sw.mjs; node tests/format.mjs; node tests/draft_commit.mjs; python3 tests/pair_cli_test.py
-for t in menu_parse server_hardening history push usage ledger status; do python3 tests/${t}_test.py; done   # pure Python, no server needed
+node tests/ui.mjs; node tests/small_screen.mjs; node tests/sw_offline.mjs; node tests/push_sw.mjs; node tests/format.mjs; node tests/draft_commit.mjs; python3 tests/pair_cli_test.py
+for t in menu_parse server_hardening history push usage ledger status qr_secret; do python3 tests/${t}_test.py; done   # pure Python, no server needed
 node tests/shots.mjs                           # regenerates docs/img/screens.png from the RUNNING app
 tests/fake-session.sh down
 ```
