@@ -1779,6 +1779,14 @@ PROJECTS_DIR = os.environ.get("SHEPR_PROJECTS", "~/Projects")   # where project 
 DIR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")      # one plain folder name: no slash, no leading dot or dash
 
 
+def shell_path(path):
+    """A folder as ONE shell word. The folder name is already one plain name (DIR_RE); the projects folder in front of it
+    is whatever SHEPR_PROJECTS says, and a space or an apostrophe in it split the command (mkdir made the wrong folders
+    and cd failed) or swallowed the && after it (the start command ran in the wrong place). shlex.quote leaves a plain path
+    exactly as it was, and a leading ~/ stays outside the quotes so the remote machine's own home still expands."""
+    return "~/" + shlex.quote(path[2:]) if path.startswith("~/") else shlex.quote(path)
+
+
 def alias_expansion(name):
     """Best effort, local only: what a shell alias expands to, read from the alias files (nothing is executed)."""
     files = [os.path.expanduser("~/.bashrc"), os.path.expanduser("~/.bash_aliases")] + sorted(glob.glob(os.path.expanduser("~/.config/bash/*.sh")))
@@ -1812,8 +1820,8 @@ def plan_new_project(body):
         if not isinstance(msg, str) or CTRL_RE.search(msg) or "\n" in msg or len(msg) > 500:
             raise HerdrError("bad_message", "the first message must be one line of up to 500 characters")
         msg = msg.strip() or None
-    # The message is data for the shell: quoted as ONE word, so quotes, $, backticks and ; in it can never run anything.
-    cmd = f"mkdir -p {path} && cd {path} && {NEW_CMD}" + (f" {shlex.quote(msg)}" if msg else "")
+    # The message and the folder are data for the shell: each quoted as ONE word, so quotes, $, backticks and ; in them can never run anything.
+    cmd = f"mkdir -p {shell_path(path)} && cd {shell_path(path)} && {NEW_CMD}" + (f" {shlex.quote(msg)}" if msg else "")
     lines = [("Title-bar name", name), ("Folder", path), ("Host", host["id"])]
     if host["kind"] == "local":
         real = os.path.expanduser(path)
@@ -1944,7 +1952,7 @@ def plan_open_folder(body):
         launcher = NEW_CMD + (" --continue" if mode == "continue" else "")
     else:
         launcher = CODEX_CMD + (" resume --last" if mode == "continue" else "")
-    cmd = f"cd {path} && {launcher}"
+    cmd = f"cd {shell_path(path)} && {launcher}"
     lines = [("Title-bar name", name), ("Folder", path + "   (exists, nothing will be created or changed)"), ("Host", host["id"]),
              ("Starts", f"{who} " + (f"and resumes the last conversation there, from {ago(last)}" if mode == "continue" else "with a new conversation"))]
     try:

@@ -519,6 +519,36 @@ for (d, mode, agent), want in cases.items():
     pl = srv.build_plan({"kind": "open_folder", "host": "gus", "dir": d, "mode": mode, "agent": agent}); st = srv.PLANS[pl["nonce"]]["steps"][0]
     good = good and st["cmd"] == want and "mkdir" not in st["cmd"] and st["op"] == "new_project" and st["cwd"] == os.path.join(froot, d) and pl["approves"] is False and pl["kind"] == "open_folder"
 check("open folder: the command is cd then the agent, resuming or fresh, never mkdir, and the plan approves nothing", good)
+# the projects folder is data for the shell too: a space or an apostrophe in SHEPR_PROJECTS must neither split the command
+# nor swallow the && after it. Run the real command in a throwaway home and look at where the folder and the agent land.
+_save = (srv.PROJECTS_DIR, srv.NEW_CMD, os.environ.get("HOME"))
+srv.NEW_CMD = "touch STARTED"
+def _lands(top, spelled, kind):
+    """True when the command made/entered exactly <home>/<top>/proj, started there, and wrote nothing anywhere else."""
+    qroot = tempfile.mkdtemp(); home = os.path.join(qroot, "home"); start = os.path.join(qroot, "start"); os.makedirs(home); os.makedirs(start)
+    os.environ["HOME"] = home
+    srv.PROJECTS_DIR = spelled.replace("HOME", home)
+    if kind == "open": os.makedirs(os.path.join(home, top, "proj"))
+    pl = srv.build_plan({"kind": "open_folder", "host": "gus", "dir": "proj", "mode": "fresh"} if kind == "open"
+                        else {"kind": "new_project", "host": "gus", "name": "N", "dir": "proj"})
+    cmd = srv.PLANS[pl["nonce"]]["steps"][0]["cmd"]
+    r = subprocess.run(["bash", "-c", cmd], cwd=start, env=dict(os.environ, HOME=home), capture_output=True, text=True, timeout=10)
+    good = os.path.isfile(os.path.join(home, top, "proj", "STARTED")) and os.listdir(start) == [] and os.listdir(home) == [top]
+    shutil.rmtree(qroot, ignore_errors=True)
+    return good and r.returncode == 0
+try:
+    for kind in ("new", "open"):
+        check(f"projects path ({kind}): a space in the projects folder, spelled ~/ or absolute, lands in that folder and starts there",
+              _lands("My Projects", "~/My Projects", kind) and _lands("My Projects", "HOME/My Projects", kind))
+        check(f"projects path ({kind}): an apostrophe cannot swallow the command or rename the folder",
+              _lands("Fred's Projects", "~/Fred's Projects", kind) and _lands("Fred's Projects", "HOME/Fred's Projects", kind))
+    srv.PROJECTS_DIR = "~/Projects"
+    check("projects path: a plain ~/Projects/name is typed exactly as before", srv.shell_path("~/Projects/alpha") == "~/Projects/alpha" and srv.shell_path("/srv/p/alpha") == "/srv/p/alpha"
+          and srv.PLANS[srv.build_plan({"kind": "new_project", "host": "gus", "name": "N", "dir": "alpha"})["nonce"]]["steps"][0]["cmd"] == "mkdir -p ~/Projects/alpha && cd ~/Projects/alpha && touch STARTED")
+finally:
+    srv.PROJECTS_DIR, srv.NEW_CMD = _save[0], _save[1]
+    if _save[2] is None: os.environ.pop("HOME", None)
+    else: os.environ["HOME"] = _save[2]
 pl = srv.build_plan({"kind": "open_folder", "host": "gus", "dir": "plain", "mode": "fresh", "name": "dup"})
 lk = {l["k"]: l["v"] for l in pl["lines"]}
 check("open folder: the sheet says the folder exists and nothing will be created, and warns that a herdr project has that name", "exists" in lk["Folder"] and "nothing will be created" in lk["Folder"] and any(l["k"] == "Heads up" for l in pl["lines"]))
