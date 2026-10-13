@@ -682,5 +682,33 @@ except srv.HerdrError as e:
     serr = e.code
 prompts = [c for c in calls_s if len(c) >= 2 and c[:2] == ["agent", "prompt"]]
 check("skip: the same session, once the question has closed, still gets the words", serr is None and prompts == [["agent", "prompt", "w1:p1", "the words"]])
+# ---- a tapped option (choose) or a set of ticks (multi) must not answer the NEXT question of the same dialog, which keeps
+# herdr's state counter and can have the very same options
+Q_A = "Allow Claude to read notes.txt?\n❯ 1. Yes\n  2. No\n"
+Q_B = "Allow Claude to run rm -rf ~/Projects?\n❯ 1. Yes\n  2. No\n"
+T_A = "Which files may Claude read?\n\n❯ 1. [ ] notes.txt\n  2. [ ] todo.md\n     Submit\n"
+T_B = T_A.replace("may Claude read?", "may Claude DELETE?")
+qs = {"t": Q_A}
+srv.READONLY = False
+srv.need_host = lambda h: {"id": "gus", "machine": None, "kind": "local", "enabled": True}
+srv.get_agent = lambda host, pane: {"agent": "claude", "agent_status": "blocked", "state_change_seq": 7, "agent_session": {"value": "s1"}, "cwd": "/tmp/x"}
+srv.read_tail = lambda host, pane, n, **k: qs["t"]
+sent_q2 = []
+srv.run_step = lambda host, pane, step: sent_q2.append(dict(step))
+def commit_on(before, after, body):
+    sent_q2.clear(); srv.LAST_SENT.clear(); qs["t"] = before
+    p = srv.build_plan(dict(body, host="gus", pane="w1:p1"))
+    qs["t"] = after
+    try:
+        srv.commit_plan(p["nonce"]); return None
+    except srv.HerdrError as e:
+        return e.code
+check("choose: 1. Yes picked for one question is not sent to a different question with the same options and counter",
+      commit_on(Q_A, Q_B, {"kind": "choose", "option": 1}) == "moved_on" and sent_q2 == [])
+check("choose: the same question still gets the pick", commit_on(Q_A, Q_A, {"kind": "choose", "option": 1}) is None and sent_q2 == [{"op": "keys", "keys": ["enter"]}])
+check("multi: ticks made for one question are not sent to a different question with the same options and counter",
+      commit_on(T_A, T_B, {"kind": "multi", "picks": [1, 2], "advance": True}) == "moved_on" and sent_q2 == [])
+check("multi: the same question still gets the ticks and Submit",
+      commit_on(T_A, T_A, {"kind": "multi", "picks": [1, 2], "advance": True}) is None and [s["keys"] for s in sent_q2] == [["1"], ["2"], ["down", "down", "enter"]])
 
 sys.exit(0 if ok else 1)

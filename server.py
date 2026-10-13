@@ -845,6 +845,9 @@ def build_plan(body):
                  "session": (a.get("agent_session") or {}).get("value")},
         "expires": time.time() + NONCE_TTL_S,
     }
+    if kind in ("choose", "multi"):
+        # The next question of the same dialog keeps state_change_seq and can have the same options ("1. Yes / 2. No").
+        plan["snap"]["question"] = menu.get("question")
     if kind == "choose":
         plan["snap"]["pick"] = [n, opt["label"], menu["current"]]
     if kind == "choose" and text_at is not None:
@@ -941,13 +944,13 @@ def _commit_pane_plan(host, plan):
     if plan["kind"] == "multi":
         menu = parse_menu(read_tail(host, plan["pane"], 80))
         now = menu and menu.get("multi") and [[o["n"], o["label"], o["checked"]] for o in menu["options"]] + [menu["cur_idx"], menu["action"]["idx"]]
-        if now != snap["multi"]:
+        if now != snap["multi"] or ("question" in snap and menu.get("question") != snap["question"]):
             raise HerdrError("moved_on", "the question on screen is not the one you ticked, so nothing was sent.")
     if plan["kind"] == "choose":
         menu = parse_menu(read_tail(host, plan["pane"], 80))
         n, label, cur = snap["pick"]
         o = menu and next((o for o in menu["options"] if o["n"] == n), None)
-        if not o or o["label"] != label or menu["current"] != cur:
+        if not o or o["label"] != label or menu["current"] != cur or ("question" in snap and menu.get("question") != snap["question"]):
             raise HerdrError("moved_on", "the menu on screen is not the one you chose from, so nothing was sent.")
     # Words typed at a blocked pane that was not a numbered menu. A later step of that same dialog can put a
     # numbered question up without moving state_change_seq, and a digit would pick an option. Only a plan prepare
@@ -971,7 +974,8 @@ def _commit_pane_plan(host, plan):
             ta = snap.get("text_at")
             keep = lambda labels: [None if k == ta else l for k, l in enumerate(labels)]   # the row you typed in no longer says "Type something"
             same = m2 and m2.get("multi") and m2["cur_idx"] == (ta if ta is not None else snap["multi"][-2]) and \
-                keep([o["label"] for o in m2["options"]]) == keep([x[1] for x in snap["multi"][:-2]])
+                keep([o["label"] for o in m2["options"]]) == keep([x[1] for x in snap["multi"][:-2]]) and \
+                ("question" not in snap or m2.get("question") == snap["question"])
             if not same or (a2["agent_status"], (a2.get("agent_session") or {}).get("value")) != (snap["status"], snap["session"]):
                 audit(plan, False, "moved_on: question changed between the ticks and the submit")
                 raise HerdrError("moved_on", "the question changed while ticking, so Submit was not sent. "
