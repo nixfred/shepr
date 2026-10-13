@@ -673,12 +673,34 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     await page.evaluate(() => { localStorage.removeItem('shepr.newtab'); localStorage.removeItem('shepr.openmode'); });
   }
 
+  // ---- a fresh read asked for while another read is in flight (Send, pull to refresh) runs once that one is back, not dropped.
+  // On its own page (already paired: same browser context), so nothing the earlier checks left scheduled can stand in for it.
+  {
+    const q = await ctx.newPage(); watch(q);
+    await q.goto(BASE + '/'); await q.waitForSelector('#splash', { state: 'detached', timeout: 9000 }); await q.waitForSelector('.item', { timeout: 9000 });
+    await q.waitForTimeout(1500);
+    let held = false, released = false, after = 0; const isFresh = (u) => u.pathname.endsWith('/api/queue') && u.searchParams.get('fresh') === '1';
+    await q.route(isFresh, async (r) => {
+      if (!held) { held = true; await new Promise((ok) => setTimeout(ok, 1500)); released = true; } else if (released) after++;
+      await r.continue(); });
+    await q.evaluate(() => { window.shepr.fetchQueue(true); });
+    for (let t = 0; t < 40 && !held; t++) await q.waitForTimeout(100);   // the first fresh read is now held in flight
+    await q.evaluate(() => { window.shepr.fetchQueue(true); });           // Send asks for another while it is held
+    await q.waitForTimeout(2200);                                        // 1.5 s hold, then the re-read leaves at once
+    check('queue: a fresh read asked for during another read still happens, after it', held && after >= 1);
+    await q.close();
+  }
+
   // ---- photos and files: resize on the phone, store on the host, put the path in the message box, send nothing
   {
     const TINY_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
     await tap(page, '.tab[data-view=waiting]'); await page.waitForTimeout(400);
     const key = await page.evaluate(() => { const a = window.shepr.S.q.agents.find((x) => x.status === 'idle' && x.agent === 'claude'); return a.host + '|' + a.pane; });   // idle: typed words are refused at a numbered question
     await tap(page, `.item[data-key="${key}"]`); await page.waitForSelector('#detail:not([hidden])'); await page.waitForTimeout(500);
+    await page.evaluate(() => {   // count the thumbnails' object URLs still alive (each holds a whole photo in memory)
+      const live = new Set(), mk = URL.createObjectURL.bind(URL), rv = URL.revokeObjectURL.bind(URL); window.__liveUrls = live;
+      URL.createObjectURL = (b) => { const u = mk(b); live.add(u); return u; }; URL.revokeObjectURL = (u) => { live.delete(u); rv(u); };
+    });
     check('photo: the message bar has an attach button', !!(await page.$('#attachbtn')) && (await page.$eval('#attachbtn', (b) => b.getBoundingClientRect().height)) >= 44);
     await page.screenshot({ path: `${OUT}/p1-attach-button.png` });
     await page.setInputFiles('#filepick', { name: 'shot.png', mimeType: 'image/png', buffer: TINY_PNG });
@@ -729,6 +751,7 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     await page.waitForSelector('#sheet:not([hidden]) .at-row');
     check('photos: at most ten at a time', (await page.$$eval('.at-row', (n) => n.length)) === 10 && await page.$eval('.at-more', (b) => b.disabled));
     await page.click('#sheet .btns button:not(.go)'); await page.waitForTimeout(300);
+    check('photos: attached, removed or cancelled, no thumbnail is left holding a photo in memory', (await page.evaluate(() => window.__liveUrls.size)) === 0);
     await page.fill('#msg', 'keep this');
     const big = await page.evaluate(async () => { const c = document.createElement('canvas'); c.width = 3200; c.height = 2400; const x = c.getContext('2d');
       for (let i = 0; i < 40; i++) { x.fillStyle = `hsl(${i * 9},80%,50%)`; x.fillRect(i * 80, (i % 7) * 340, 300, 600); }

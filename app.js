@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v43';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v44';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -308,12 +308,14 @@ function appIsStale(serverBuild) {
   }
   notify('A new version of Shepr (' + serverBuild + ') is ready.', false, ['Update', () => location.reload()], true);
 }
-let fetching = false;
+// One read at a time. A fresh read asked for while one is in flight (Send, pull to refresh) is not dropped: the read in flight
+// may have left before the change it needs to show, so it runs again once that one is back.
+let fetching = null, fetchAgain = false;
 function fetchQueue(fresh) {
-  if (fetching || !S.dev) return Promise.resolve();
-  fetching = true;
+  if (!S.dev) return Promise.resolve();
+  if (fetching) { if (fresh) fetchAgain = true; return fetching; }
   $('mini').classList.add('busy');
-  return api('api/queue' + (fresh ? '?fresh=1' : '')).then((q) => {
+  fetching = api('api/queue' + (fresh ? '?fresh=1' : '')).then((q) => {
     S.q = q; setOnline(!q.cached); render(); if (!q.cached) { appIsStale(q.build); updateBadge(); if (!S.ledgerAt || Date.now() - S.ledgerAt > 60000) loadLedger(); }
     // The app files can be newer than the server process behind them (files are served live, the server only changes when
     // it restarts). New buttons then fail in confusing ways, so say it plainly once.
@@ -322,7 +324,8 @@ function fetchQueue(fresh) {
       notify('This host is running Shepr ' + q.server_build + ' but the app is ' + q.build + '. Restart Shepr on the host, or newer buttons will fail.', true);
     }
   }).catch((e) => { console.warn('queue fetch failed:', e && e.message, e && e.stack && e.stack.split('\n').slice(0, 3).join(' | ')); if (!e.status) setOnline(false); })
-    .finally(() => { fetching = false; setTimeout(() => $('mini').classList.remove('busy'), 400); });
+    .finally(() => { fetching = null; setTimeout(() => $('mini').classList.remove('busy'), 400); if (fetchAgain) { fetchAgain = false; fetchQueue(true); } });
+  return fetching;
 }
 const agents = () => (S.q ? S.q.agents : []);
 const byKey = (k) => agents().find((a) => keyOf(a) === k);
@@ -2066,17 +2069,20 @@ $('attachbtn').addEventListener('click', () => { if (S.cur) { ATT.add = false; $
 $('filepick').addEventListener('change', () => {
   const files = Array.from($('filepick').files || []); $('filepick').value = '';
   if (!files.length || !S.cur) return;
-  if (!ATT.add || !ATT.to) { ATT.items = []; ATT.to = { host: S.cur.host, pane: S.cur.pane }; }
+  if (!ATT.add || !ATT.to) { attDrop(); ATT.to = { host: S.cur.host, pane: S.cur.pane }; }
   files.forEach((f) => { if (ATT.items.length < ATT_MAX) ATT.items.push({ file: f, comment: '', path: null, url: null }); });
   if (files.length + (ATT.items.length - files.length) > ATT_MAX) notify('Up to ' + ATT_MAX + ' at a time.', true);
   openAttachSheet();
 });
+// A thumbnail holds the whole photo in memory until its object URL is revoked, so every way the photos go (cancelled, replaced,
+// attached) revokes them; a few cancelled camera photos would otherwise stay in memory until the page reloads.
+function attDrop() { ATT.items = []; ATT.urls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ } }); ATT.urls = []; }
 function attName(f) { return (f.name || 'photo').replace(/^image\./, 'photo.'); }
 function attThumb(it) {
   const box = el('span', 'at-th');
   const isImg = /^image\//.test(it.file.type) || /\.(jpe?g|png|gif|webp)$/i.test(it.file.name || '');
   if (isImg) {
-    try { it.url = it.url || URL.createObjectURL(it.file); ATT.urls.push(it.url); } catch (e) { it.url = null; }
+    try { if (!it.url) { it.url = URL.createObjectURL(it.file); ATT.urls.push(it.url); } } catch (e) { it.url = null; }
     if (it.url) { const im = el('img'); im.alt = ''; im.src = it.url; im.addEventListener('error', () => { im.remove(); box.textContent = 'IMG'; }); box.append(im); return box; }
   }
   box.textContent = (/\.pdf$/i.test(it.file.name || '') ? 'PDF' : 'FILE');
@@ -2087,7 +2093,7 @@ function openAttachSheet() {
   box.append(el('h3', null, n === 1 ? 'Attach 1 photo' : 'Attach ' + n + ' photos'), el('div', 'sub', 'Add a comment to each if you like. They go into the message box; nothing is sent until you press Send.'));
   const list = el('div', 'at-list'), grows = [], cap = n === 1 ? 6 : 4;   // a lone photo gets a taller box
   ATT.items.forEach((it, i) => {
-    const row = el('div', 'at-row'), ci = el('textarea', 'at-c'), rm = btn('×', 'at-x', () => { ATT.items.splice(i, 1); if (!ATT.items.length) { closeSheet(); return; } openAttachSheet(); });
+    const row = el('div', 'at-row'), ci = el('textarea', 'at-c'), rm = btn('×', 'at-x', () => { const [gone] = ATT.items.splice(i, 1); if (gone && gone.url) { try { URL.revokeObjectURL(gone.url); } catch (e) { /* ignore */ } ATT.urls = ATT.urls.filter((u) => u !== gone.url); } if (!ATT.items.length) { closeSheet(); return; } openAttachSheet(); });
     ci.rows = 1; ci.maxLength = 300; ci.placeholder = 'Comment on this photo'; ci.value = it.comment; ci.autocomplete = 'off'; ci.enterKeyHint = 'done';
     ci.addEventListener('input', () => { it.comment = ci.value; fitBox(ci, cap); });   // grows to show everything you type, up to four lines
     ci.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); ci.blur(); } });   // one paragraph per photo; Done closes the keyboard
@@ -2099,7 +2105,7 @@ function openAttachSheet() {
   const more = btn('+ Add more', 'at-more', () => { ATT.add = true; $('filepick').click(); }); more.disabled = ATT.busy || n >= ATT_MAX;
   const status = el('div', 'at-status'); status.id = 'at-status';
   const go = btn(n === 1 ? 'Attach' : 'Attach ' + n, 'go', async () => { await attachAll(go, status); }); go.id = 'at-go'; go.disabled = ATT.busy;
-  const row = el('div', 'btns'); row.append(btn('Cancel', '', () => { ATT.items = []; closeSheet(); }), go);
+  const row = el('div', 'btns'); row.append(btn('Cancel', '', () => { attDrop(); closeSheet(); }), go);
   box.append(list, more, status, row);
   openSheet(box);
   grows.forEach((t) => fitBox(t, cap)); setTimeout(() => grows.forEach((t) => fitBox(t, cap)), 90);   // once it is on screen to measure, and again after it has slid up
@@ -2128,7 +2134,7 @@ async function attachAll(go, status) {
       const d = drafts.get(key); drafts.put(key, (d.trim() ? d.replace(/\s*$/, '\n') : '') + block + '\n');
       notify('Attached ' + count + ' to the message waiting in ' + to.pane + '.', false);
     }
-    ATT.items = []; ATT.urls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ } }); ATT.urls = [];
+    attDrop();
     closeSheet();
   } catch (e) { status.textContent = e.message; status.classList.add('err'); go.disabled = false; notify(e.message, true); }
   finally { ATT.busy = false; $('attachbtn').classList.remove('on'); }
@@ -2481,4 +2487,4 @@ async function boot() {
   hideSplash(false);
 }
 boot();
-window.shepr = { S, ping, standalone, signHeaders, renderBlocks, appIsStale, BUILD, liveCut, syncHistory, prepareUpload, loadLedger, fmtDur, paceLive, budgetVerdict, drafts, prefs, PREFS, currentModel, seenStore, isSeen, finished, finishedSeen, paintMain, paintHostbar, budgetGuidance, hostRow, paintTailAge, subCard };
+window.shepr = { S, ping, fetchQueue, standalone, signHeaders, renderBlocks, appIsStale, BUILD, liveCut, syncHistory, prepareUpload, loadLedger, fmtDur, paceLive, budgetVerdict, drafts, prefs, PREFS, currentModel, seenStore, isSeen, finished, finishedSeen, paintMain, paintHostbar, budgetGuidance, hostRow, paintTailAge, subCard };
