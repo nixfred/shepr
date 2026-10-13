@@ -143,6 +143,12 @@ check("kimi: a hash inside the quotes stays in the key", f.calls[0][1]["Authoriz
 labels = {l["label"]: l for l in r["limits"]}
 check("kimi: the request window that cuts you off wins the 5-hour row (8%), its duplicate credit ratio is dropped, the month follows", abs(labels["Session (5-hour)"]["used"] - 0.08) < 1e-9 and "Monthly (total)" in labels and sum(1 for l in r["limits"] if l["label"].startswith("Session")) == 1)
 check("kimi: the month is a real calendar month long (October reset on the 19th: back to September 19th is 30 days)", labels["Monthly (total)"]["window_ms"] == 30 * 86400_000)
+def _kimi_row(minutes):
+    raw = {"limits": [{"window": {"duration": minutes, "timeUnit": "TIME_UNIT_MINUTE"}, "detail": {"limit": "100", "used": "8", "resetTime": "2026-10-10T13:43:48Z"}}]}
+    return usage.parse_kimi_usages(raw)[0]
+check("kimi: a 30 and a 90 minute window are 30 and 90 minutes long, not the 5-hour fallback every session label gets",
+      _kimi_row(30)["window_ms"] == 30 * 60_000 and _kimi_row(90)["window_ms"] == 90 * 60_000)
+check("kimi: 300 minutes is still the 5-hour window", _kimi_row(300)["label"] == "Session (5-hour)" and _kimi_row(300)["window_ms"] == 5 * H)
 check("kimi: no key means not shown, and no request", usage.read_kimi(NOW, Fake(), {}, tmp()) is None)
 f = Fake(); r = usage.read_kimi(NOW, f, {"KIMI_API_KEY": "k", "KIMI_BASE_URL": "http://insecure.example"}, tmp())
 check("kimi: a plain-http base URL is refused so the key is never sent in the clear", f.calls == [] and "https" in r["help"])

@@ -105,12 +105,14 @@ def month_ms(resets_ms):
 
 
 def window_ms_for(label, resets_ms, prev_id):
-    """How long a window is when the provider did not say: the label carries it ("Session (5-hour)", "Weekly (7-day)"), else the distance
-    to the previous reset we saw."""
+    """How long a window is when the provider did not say: the label carries it ("Session (5-hour)", "Weekly (7-day)",
+    "Session (30-minute)"), else the distance to the previous reset we saw. A minute count is read here, before the
+    "session" fallback below: Kimi labels a window that is not a whole number of hours "Session (30-minute)", which that
+    fallback would pace as 5 hours."""
     t = str(label or "").lower()
-    m = re.search(r"(\d+)\s*-\s*(hour|day)", t)
+    m = re.search(r"(\d+)\s*-\s*(minute|hour|day)", t)
     if m:
-        return int(m.group(1)) * (3600_000 if m.group(2) == "hour" else 86400_000)
+        return int(m.group(1)) * {"minute": 60_000, "hour": 3600_000, "day": 86400_000}[m.group(2)]
     if "week" in t:
         return 7 * 86400_000
     if "month" in t:
