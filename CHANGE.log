@@ -1,6 +1,14 @@
 Shepr change log. Newest first.
 Every outside contribution is listed with the contributor's GitHub profile and, when one could be verified, their X profile.
 
+2026-10-14  server only  HANCORE  https://github.com/HANCORE-linux
+  X: https://x.com/hancore_linux (listed on their GitHub profile, checked 2026-10-13)
+  Second review of the Omarchy plugin (omacom/omarchy-plugin-marketplace#11393): the server read a POST body before it
+  checked who was sending it, and its 20 second socket timeout restarted on every receive, so a caller trickling one
+  byte at a time could hold all 48 connection slots for days. Fixed: the request line and headers have 5 seconds in all,
+  a JSON body 10 and a photo 120, enforced from a timer that closes the socket; a caller who is not a paired phone is
+  refused before any body is read; at most 16 bodies are read unsigned at once.
+
 2026-10-12  v42 (1b97a6d)  HANCORE  https://github.com/HANCORE-linux
   X: https://x.com/hancore_linux (listed on their GitHub profile, checked 2026-10-13)
   Review of the Omarchy plugin for the marketplace (omacom/omarchy-plugin-marketplace#11176): the one-time pairing code

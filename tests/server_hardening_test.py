@@ -751,4 +751,99 @@ for args, what in ((["pair", "--no-wait", "--json"], "pair"), (["pair", "--cance
     check(f"{what}: then finishes (exit 0) and leaves pairing.json {'written' if what == 'pair' else 'removed'}",
           p.returncode == 0 and os.path.exists(os.path.join(pdir, "pairing.json")) == (what == "pair"))
 
+# ---- slow callers (Handcore, #11393, 2026-10-14): a trickle must not hold a connection open, and a caller who is not a paired
+# phone must not get to send a body at all. A real server on a free port, short deadlines, raw sockets.
+import functools, socket as _socket
+srv.HEADER_SECS, srv.BODY_SECS = 1.0, 1.5
+srv.mutate_devices(lambda devs: devs.__setitem__("slowdev", {"name": "slow", **{k: pub(6)[k] for k in ("x", "y")}}))
+httpd = srv.CappedServer(("127.0.0.1", 0), functools.partial(srv.Handler, directory=os.path.join(here, "..")))
+threading.Thread(target=httpd.serve_forever, daemon=True).start()
+PORT = httpd.server_address[1]
+
+def conn():
+    c = _socket.create_connection(("127.0.0.1", PORT), timeout=8); return c
+
+def read_all(c, wait):
+    """Everything the server sends until it closes the connection, or `wait` seconds pass. Returns (bytes, closed)."""
+    c.settimeout(0.25); out = b""; end = time.time() + wait
+    while time.time() < end:
+        try:
+            d = c.recv(65536)
+        except _socket.timeout:
+            continue
+        except OSError:
+            return out, True
+        if not d: return out, True
+        out += d
+    return out, False
+
+def post_head(path, n, dev="slowdev", extra=""):
+    ts = str(int(time.time() * 1000))
+    return (f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Shepr: 1\r\nContent-Type: application/json\r\nContent-Length: {n}\r\n"
+            f"X-Shepr-Device: {dev}\r\nX-Shepr-Ts: {ts}\r\nX-Shepr-Nonce: {'n' * 12}\r\nX-Shepr-Sig: {srv.b64u(b'x' * 64)}\r\n{extra}\r\n").encode()
+
+# an honest request that arrives in two pieces, half a second apart, is answered
+c = conn(); c.sendall(b"GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\n"); time.sleep(0.5); c.sendall(b"\r\n")
+out, _ = read_all(c, 3); c.close()
+check("slow callers: an honest request sent in two pieces is still answered", b"200 OK" in out.split(b"\r\n")[0] and out.endswith(b"ok\n"))
+
+# headers sent one byte every 0.3 s: cut at the header deadline, not after twenty seconds of patience per byte
+c = conn(); t0 = time.time(); c.sendall(b"GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\n"); closed_at = None
+while time.time() - t0 < 6:
+    try: c.sendall(b"X-A: b\r\n"[:1] if int((time.time() - t0) * 10) % 2 else b"Y")
+    except OSError: closed_at = time.time() - t0; break
+    time.sleep(0.3)
+if closed_at is None:
+    out, closed = read_all(c, 1); closed_at = (time.time() - t0) if closed else None
+c.close()
+check("slow callers: headers trickled a byte at a time are cut at the 1 s deadline", closed_at is not None and 0.8 <= closed_at <= 3.5)
+
+# a paired-looking caller who trickles the body: cut at the body deadline, and gets no answer
+c = conn(); c.sendall(post_head("/api/send/prepare", 100)); t0 = time.time(); closed_at = None
+while time.time() - t0 < 6:
+    try: c.sendall(b"{")
+    except OSError: closed_at = time.time() - t0; break
+    time.sleep(0.3)
+if closed_at is None:
+    out, closed = read_all(c, 1); closed_at = (time.time() - t0) if closed else None
+c.close()
+check("slow callers: a body trickled a byte at a time is cut at the 1.5 s deadline", closed_at is not None and 1.2 <= closed_at <= 3.5)
+
+# a caller who is not a paired phone never gets to send a body: the answer comes at once, and it is readable (no reset)
+c = conn(); c.sendall(post_head("/api/send/prepare", 16000, dev="nobody")); t0 = time.time()
+out, closed = read_all(c, 3); c.close()
+check("slow callers: an unknown device is answered 401 at once, before any body", out.startswith(b"HTTP/1.0 401") and b"unknown_device" in out and time.time() - t0 < 1.0)
+c = conn(); c.sendall(post_head("/api/send/prepare", 16000, dev="nobody") + b"x" * 16000)
+out, closed = read_all(c, 3); c.close()
+check("slow callers: ...and a phone that already sent its whole body still reads the 401, not a reset", out.startswith(b"HTTP/1.0 401") and b"unknown_device" in out)
+c = conn(); c.sendall(post_head("/api/send/prepare", 100).replace(b"X-Shepr-Sig: ", b"X-Shepr-Xig: "))
+out, closed = read_all(c, 3); c.close()
+check("slow callers: a request with no signature header is refused before its body too", out.startswith(b"HTTP/1.0 401") and b"unpaired" in out)
+
+# pairing is open to a not-yet-paired phone, so its body is read, but under the same deadline
+c = conn(); c.sendall(b"POST /api/pair HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Shepr: 1\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n")
+t0 = time.time(); closed_at = None
+while time.time() - t0 < 6:
+    try: c.sendall(b"{")
+    except OSError: closed_at = time.time() - t0; break
+    time.sleep(0.3)
+if closed_at is None:
+    out, closed = read_all(c, 1); closed_at = (time.time() - t0) if closed else None
+c.close()
+check("slow callers: a trickled pairing body is cut at the deadline as well", closed_at is not None and 1.2 <= closed_at <= 3.5)
+
+# sixteen bodies in flight is the ceiling: the seventeenth is told to slow down, and the slots come back when the deadline cuts them
+held = []
+for _ in range(16):
+    h = conn(); h.sendall(post_head("/api/send/prepare", 100) + b"{"); held.append(h)
+time.sleep(0.4)
+c = conn(); c.sendall(post_head("/api/send/prepare", 100) + b"{" * 100); out, _ = read_all(c, 3); c.close()
+check("slow callers: with sixteen bodies being read, the next one is answered 429 slow_down", out.startswith(b"HTTP/1.0 429") and b"slow_down" in out)
+time.sleep(1.8)
+check("slow callers: the deadline frees every one of those slots", all(read_all(h, 0.3)[1] for h in held))
+[h.close() for h in held]
+c = conn(); c.sendall(post_head("/api/send/prepare", 100) + b"{}" + b" " * 98); out, _ = read_all(c, 3); c.close()
+check("slow callers: afterwards a body is read again (the answer is a bad signature, not a refusal to listen)", b"bad_signature" in out)
+httpd.shutdown()
+
 sys.exit(0 if ok else 1)

@@ -1185,8 +1185,11 @@ def dev_public(did, d):
             "last_seen": d.get("last_seen")}
 
 
-def verify_request(headers, method, target, body):
-    """Every /api call except hello and pair carries a signature from an authorized device."""
+def precheck_request(headers):
+    """The part of authentication that needs no body: a known device, a fresh timestamp, well-formed fields.
+    It runs BEFORE the body is read, so a caller who is not a paired phone is turned away without holding a
+    connection open while it sends (or pretends to send) a body. The signature still covers the body, so the
+    full check stays in verify_request."""
     dev, ts, nonce, sig = (headers.get(h) for h in ("X-Shepr-Device", "X-Shepr-Ts", "X-Shepr-Nonce", "X-Shepr-Sig"))
     if not (dev and ts and nonce and sig):
         raise HerdrError("unpaired", "this device has not been paired with this host")
@@ -1202,6 +1205,12 @@ def verify_request(headers, method, target, body):
         raise HerdrError("stale", "request is too old or the phone clock is off")
     if not 8 <= len(nonce) <= 64:
         raise HerdrError("bad_signature", "bad nonce")
+    return dev, d, ts, nonce, sigb
+
+
+def verify_request(headers, method, target, body):
+    """Every /api call except hello and pair carries a signature from an authorized device."""
+    dev, d, ts, nonce, sigb = precheck_request(headers)
     msg = f"{ts}\n{nonce}\n{method}\n{target}\n{hashlib.sha256(body).hexdigest()}".encode()
     x, y = dev_xy(d)
     if not ecdsa_verify(x, y, msg, sigb):
@@ -2454,9 +2463,68 @@ def learn_tailnet():
         OWNER["names"].add(n.strip())
 
 
+# Whole-request deadlines. A socket timeout alone is not enough: it restarts on every receive, so a caller who sends one
+# byte every few seconds never trips it and can hold a connection (and one of the 48 slots) for days. These are wall-clock
+# limits for the whole of one phase, enforced by closing the socket from a timer, so a blocked read is cut off however
+# slowly the bytes arrive. A phone sends its request in one burst; nothing honest comes near them.
+HEADER_SECS = 5      # request line and every header, counted from accept
+BODY_SECS = 10       # a JSON body (at most 16 KB)
+UPLOAD_SECS = 120    # a photo or file (at most UPLOAD_MAX), from a phone on a slow link
+BODY_SLOTS = threading.BoundedSemaphore(16)   # bodies being read before their signature is checked, all callers together
+
+
 class Handler(SimpleHTTPRequestHandler):
     server_version = "shepr"
-    timeout = 20   # a client that stops sending is dropped instead of holding a thread forever
+    timeout = 20   # a client that stops reading our answer, or sits idle, is dropped instead of holding a thread forever
+
+    def setup(self):
+        super().setup()
+        self._dog, self._cut, self._unread = None, False, 0
+        self.arm(HEADER_SECS)
+
+    def arm(self, secs):
+        """Close this connection if the current phase has not finished in `secs` seconds, however the bytes trickle."""
+        self.disarm()
+        sock = self.connection
+
+        def fire():
+            self._cut = True
+            try:
+                sock.shutdown(socket.SHUT_RDWR)   # wakes a read that is blocked in recv
+            except OSError:
+                pass
+        self._dog = threading.Timer(secs, fire)
+        self._dog.daemon = True
+        self._dog.start()
+
+    def disarm(self):
+        if self._dog:
+            self._dog.cancel()
+            self._dog = None
+
+    def finish(self):
+        self.disarm()
+        # An answer sent before the body was read (a 401 for an unknown phone, say) leaves those bytes in the socket,
+        # and closing on unread data resets the connection, which can swallow the answer. So say we are done writing,
+        # then take what the caller already sent, for a couple of seconds at most.
+        if self._unread > 0 and not self._cut:
+            try:
+                self.wfile.flush()
+                self.connection.shutdown(socket.SHUT_WR)
+                self.arm(2)
+                self.rfile.read(min(self._unread, 16384))
+            except (OSError, ValueError):
+                pass
+            self.disarm()
+        super().finish()
+
+    def parse_request(self):
+        ok = super().parse_request()
+        self.disarm()
+        if self._cut:   # the headers were cut off by the deadline: half a request is not answered
+            self.close_connection = True
+            return False
+        return ok
 
     def log_message(self, fmt, *args):
         if args and str(args[1]) not in ("200", "304"):
@@ -2512,10 +2580,23 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             raw = b""
             if post:
+                if u.path != "/api/pair":   # pairing is the one write a not-yet-paired phone may make
+                    precheck_request(self.headers)   # anyone else is turned away before a byte of body is read
                 n = int(self.headers.get("Content-Length") or 0)
                 if not 0 < n <= (UPLOAD_MAX if u.path == "/api/upload" else 16384):
                     raise HerdrError("bad_request", "body missing or too large")
-                raw = self.rfile.read(n)
+                if not BODY_SLOTS.acquire(blocking=False):
+                    raise HerdrError("slow_down", "too many requests are being received at once; try again in a moment")
+                self.arm(UPLOAD_SECS if u.path == "/api/upload" else BODY_SECS)
+                try:
+                    raw = self.rfile.read(n)
+                finally:
+                    self.disarm()
+                    BODY_SLOTS.release()
+                if self._cut or len(raw) < n:   # too slow, or the sender went away: there is no one to answer
+                    self.close_connection = True
+                    return
+                self._unread = 0
             body = json.loads(raw) if post and u.path != "/api/upload" else {}
             if post and not isinstance(body, dict):
                 raise HerdrError("bad_request", "body must be an object")
@@ -2624,6 +2705,10 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_HEAD()
 
     def do_POST(self):
+        try:
+            self._unread = max(0, int(self.headers.get("Content-Length") or 0))   # api() zeroes it once the body is read
+        except ValueError:
+            self._unread = 0
         if urlsplit(self.path).path.startswith("/api/"):
             return self.api(True)
         self.send_error(405)
