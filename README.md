@@ -36,14 +36,17 @@ case ":$PATH:" in *":$bindir:"*) ;; *) export PATH="$bindir:$PATH" ;; esac
 cat > ~/.config/systemd/user/shepr.service <<EOF
 [Unit]
 Description=Shepr
+StartLimitIntervalSec=0
 
 [Service]
 WorkingDirectory=$PWD
+ExecStartPre=-/usr/bin/tailscale wait --timeout=120s
 ExecStart=/usr/bin/python3 $PWD/server.py 8742
 ExecStartPost=/usr/bin/tailscale serve --bg --https=8742 http://127.0.0.1:8742
 ExecStopPost=-/usr/bin/tailscale serve --https=8742 off
 Restart=on-failure
-RestartSec=3
+RestartSec=5
+TimeoutStartSec=180
 
 [Install]
 WantedBy=default.target
@@ -51,6 +54,8 @@ EOF
 systemctl --user daemon-reload && systemctl --user enable --now shepr
 shepr pair                                                           # shows a QR code
 ```
+
+**Installed before 2026-10-14?** Run `shepr fix-boot` once. The old unit could start before Tailscale was connected at boot, fail on `tailscale serve`, and stay down after systemd's five quick retries, so the phone found nothing until someone started it by hand. `fix-boot` adds a drop-in that waits for Tailscale and keeps retrying; `shepr status` warns while a unit still lacks it.
 
 The link goes in `~/.local/bin` or `~/bin`, whichever comes first on `PATH`. If neither does, this paste uses `~/.local/bin` and adds it for this shell. The unit written here is named `shepr`. A nixweb install keeps the unit name it already chose.
 
@@ -272,6 +277,7 @@ shepr pair --cancel      # drop a code that is still waiting to be used
 shepr devices            # list paired phones with SSH-style SHA256 fingerprints
 shepr revoke <name|id>   # sign a phone out now
 shepr status [--json]    # is the server up, how many phones, which agents are waiting (read only, needs no server)
+shepr fix-boot           # make the installed unit wait for Tailscale at boot and keep retrying
 ```
 
 **This is not an SSH key.** A home-screen web app cannot speak SSH or hold an OpenSSH key; WebCrypto can. The device
@@ -361,6 +367,7 @@ tests/fake-session.sh up                       # isolated herdr session "hrtest"
 eval "$(tests/fake-session.sh env)"
 export SHEPR_LOCAL_ONLY=1 SHEPR_URL=http://localhost:8743 SHEPR_POLL=3   # LOCAL_ONLY: a real machine on your tailnet cannot change a result
 export CLAUDE_HOME=$PWD/tests/fixtures/claude-home CODEX_HOME=$PWD/tests/fixtures/codex-home   # fixture skills and conversations
+export SHEPR_USAGE_FIXTURE=/tmp/claude-1000/shepr-usage.json   # the Subs page reads the fixture tests/ui.mjs writes
 export SHEPR_CLAUDE_CMD='echo STARTED' SHEPR_CODEX_CMD='echo CODEX' SHEPR_NEW_CMD='echo CCC' SHEPR_PROJECTS=/tmp/shepr-projects SHEPR_PUSH_ALLOW=127.0.0.1:9988
 python3 server.py 8743 &
 node tests/ui.mjs; node tests/small_screen.mjs; node tests/sw_offline.mjs; node tests/push_sw.mjs; node tests/format.mjs; node tests/draft_commit.mjs; python3 tests/pair_cli_test.py

@@ -103,4 +103,50 @@ with tempfile.TemporaryDirectory() as td:
     r = subprocess.run([sys.executable, "-I", SERVER, "pair", "--cancel"], env=env, capture_output=True, text=True, timeout=60)
     check("pair --cancel: with nothing waiting it says so and still succeeds", r.returncode == 0 and "no pairing code" in r.stdout, (r.returncode, r.stdout, r.stderr))
 
+# 6. a unit that does not wait for Tailscale may stay down after a reboot: status warns, `fix-boot` adds the drop-in
+#    and reloads systemd (a stand-in systemctl here, so the real user manager is never touched)
+with tempfile.TemporaryDirectory() as td:
+    home, state = os.path.join(td, "home"), os.path.join(td, "state")
+    os.makedirs(home); os.makedirs(state)
+    herdr = os.path.join(td, "herdr"); stub_herdr(herdr, [], [])
+    udir = os.path.join(home, ".config", "systemd", "user"); os.makedirs(udir)
+    with open(os.path.join(udir, "shepr.service"), "w") as f:
+        f.write(f"[Service]\nExecStart=/usr/bin/python3 {SERVER} 8742\nExecStartPost=/usr/bin/tailscale serve --bg --https=8742 http://127.0.0.1:8742\n")
+    with open(os.path.join(udir, "other.service"), "w") as f:
+        f.write("[Service]\nExecStart=/usr/bin/python3 /tmp/elsewhere/server.py 1\n")
+    fake = os.path.join(td, "bin"); os.makedirs(fake)
+    log = os.path.join(td, "systemctl.log")
+    with open(os.path.join(fake, "systemctl"), "w") as f:
+        f.write(f"#!/bin/sh\necho \"$@\" >> {log}\n")
+    os.chmod(os.path.join(fake, "systemctl"), 0o755)
+
+    def fix_boot():
+        env = {"PATH": fake + ":/usr/bin:/bin", "HOME": home, "SHEPR_STATE": state, "XDG_STATE_HOME": os.path.join(home, "s")}
+        return subprocess.run([sys.executable, "-I", SERVER, "fix-boot"], env=env, capture_output=True, text=True, timeout=60)
+
+    d = json.loads(status(home, state, herdr, "--json").stdout)
+    check("status: a unit without the Tailscale wait is flagged as boot-unsafe", d.get("boot_unsafe") == ["shepr"], d)
+    r = status(home, state, herdr)
+    check("status: the plain text form warns and names the fix", "may stay down after a reboot" in r.stdout and "shepr fix-boot" in r.stdout, r.stdout)
+    r = fix_boot()
+    conf = os.path.join(udir, "shepr.service.d", "shepr-boot.conf")
+    body = open(conf).read() if os.path.exists(conf) else ""
+    check("fix-boot: writes a drop-in that waits for Tailscale and never stops retrying",
+          r.returncode == 0 and "ExecStartPre=-/usr/bin/tailscale wait" in body and "StartLimitIntervalSec=0" in body, (r.returncode, r.stdout, r.stderr))
+    check("fix-boot: only the unit that runs this server.py gets it", not os.path.exists(os.path.join(udir, "other.service.d")), os.listdir(udir))
+    check("fix-boot: reloads systemd once, and only with --user", open(log).read().split("\n")[:-1] == ["--user daemon-reload"] if os.path.exists(log) else False,
+          open(log).read() if os.path.exists(log) else "no call")
+    d = json.loads(status(home, state, herdr, "--json").stdout)
+    check("status: after fix-boot the unit is no longer flagged", d.get("boot_unsafe") == [], d)
+    r = fix_boot()
+    check("fix-boot: a second run changes nothing and does not reload again",
+          r.returncode == 0 and "already waits" in r.stdout and open(log).read().count("daemon-reload") == 1, (r.stdout, open(log).read()))
+    with open(conf, "w") as f:
+        f.write("[Unit]\n# StartLimitIntervalSec=0\n[Service]\n# ExecStartPre=-/usr/bin/tailscale wait\n")
+    d = json.loads(status(home, state, herdr, "--json").stdout)
+    check("status: commented-out lines do not count as the fix", d.get("boot_unsafe") == ["shepr"], d)
+    os.remove(os.path.join(udir, "shepr.service")); os.remove(os.path.join(udir, "other.service"))
+    r = fix_boot()
+    check("fix-boot: with no unit for this server.py it says so and fails", r.returncode == 1 and "no user unit" in r.stdout, (r.returncode, r.stdout))
+
 sys.exit(1 if bad else 0)

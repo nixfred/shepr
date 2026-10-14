@@ -2673,10 +2673,14 @@ def _service_runs(text, me):
     return False
 
 
+def _unit_dir():
+    return os.path.join(os.path.expanduser("~"), ".config", "systemd", "user")
+
+
 def unit_names():
     """The user units on this machine that run THIS server.py (nixweb names one after the session directory, the README writes shepr.service)."""
     me = os.path.realpath(__file__)
-    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd", "user")
+    unit_dir = _unit_dir()
     names = []
     try:
         entries = sorted(os.listdir(unit_dir))
@@ -2708,6 +2712,70 @@ def unit_hint():
         return " or ".join(f"systemctl --user start {n}" for n in names)
     return ("the unit you installed (the README writes shepr.service; "
             "nixweb names its unit nixweb-<session>)")
+
+
+# At boot the user manager can start Shepr before Tailscale is connected. `tailscale serve` then fails ("unexpected
+# state: NoState"), that failure stops the service, and systemd gives up after five quick tries, so the phone finds
+# nothing until someone starts it by hand. This drop-in waits for Tailscale first and never stops retrying.
+BOOT_DROPIN = "shepr-boot.conf"
+BOOT_CONF = """# Written by `shepr fix-boot`: wait for Tailscale at boot, and keep retrying instead of giving up.
+[Unit]
+StartLimitIntervalSec=0
+
+[Service]
+ExecStartPre=-/usr/bin/tailscale wait --timeout=120s
+TimeoutStartSec=180
+RestartSec=5
+"""
+
+
+def boot_safe(name):
+    """True when the unit (with its drop-ins) waits for Tailscale and has no start limit, so a reboot brings it back."""
+    paths = [os.path.join(_unit_dir(), name + ".service")]
+    paths += sorted(glob.glob(os.path.join(_unit_dir(), name + ".service.d", "*.conf")))
+    lines = []
+    for p in paths:
+        try:
+            with open(p, errors="replace") as f:
+                lines += [l.strip() for l in f if not l.lstrip().startswith(("#", ";"))]
+        except OSError:
+            continue
+    waits = any(l.startswith("ExecStartPre=") and "tailscale wait" in l for l in lines)
+    nolimit = any(re.fullmatch(r"StartLimitIntervalSec\s*=\s*(0|infinity)", l) for l in lines)
+    return waits and nolimit
+
+
+def cli_fix_boot(a):
+    """Add the boot drop-in to every user unit that runs this server.py, then reload systemd. The running server is
+    left alone: the change applies the next time the unit starts."""
+    names = unit_names()
+    if not names:
+        print("shepr: no user unit runs this server.py. Install one first (README, \"Use it\").")
+        return 1
+    wrote = False
+    for n in names:
+        if boot_safe(n):
+            print(f"  {n}: already waits for Tailscale and keeps retrying")
+            continue
+        d = os.path.join(_unit_dir(), n + ".service.d")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, BOOT_DROPIN)
+        with open(path + ".tmp", "w") as f:
+            f.write(BOOT_CONF)
+        os.replace(path + ".tmp", path)
+        print(f"  {n}: wrote {path}")
+        wrote = True
+    if wrote:
+        try:
+            r = subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            print(f"shepr: could not reload systemd ({e}). Run: systemctl --user daemon-reload")
+            return 1
+        if r.returncode != 0:
+            print("shepr: systemctl --user daemon-reload failed: " + (r.stderr or r.stdout).strip())
+            return 1
+        print("  systemd reloaded. Shepr will come back after a reboot, even when Tailscale is slow to connect.")
+    return 0
 
 
 QR_NAME = "pair-qr.png"
@@ -2872,6 +2940,7 @@ def cli_status(a):
     info = server_info()
     out = {"build": BOOT_BUILD, "running": bool(info), "url": (info or {}).get("url"), "devices": len(devices()),
            "units": unit_names(), "herdr": False, "counts": {}, "waiting": []}
+    out["boot_unsafe"] = [n for n in out["units"] if not boot_safe(n)]
     try:
         agents = run_herdr(None, ["agent", "list"], timeout=6)["result"]["agents"]
         labels = {w["workspace_id"]: w.get("label") for w in run_herdr(None, ["workspace", "list"], timeout=6)["result"]["workspaces"]}
@@ -2891,6 +2960,8 @@ def cli_status(a):
         return 0
     print(f"shepr {BOOT_BUILD}: " + (f"running at {out['url']}" if out["running"] else f"not running. Start it: {unit_hint()}"))
     print(f"  {out['devices']} phone(s) paired" + ("" if out["devices"] else ". Pair one: shepr pair"))
+    for n in out["boot_unsafe"]:
+        print(f"  warning: {n} may stay down after a reboot (it does not wait for Tailscale). Fix once: shepr fix-boot")
     if out["herdr"]:
         print("  agents: " + (", ".join(f"{n} {k}" for k, n in sorted(out["counts"].items())) or "none"))
         for w in out["waiting"]:
@@ -2947,7 +3018,7 @@ class CappedServer(ThreadingHTTPServer):
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] in ("pair", "devices", "revoke", "status"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("pair", "devices", "revoke", "status", "fix-boot"):
         ap = argparse.ArgumentParser(prog="shepr")
         sub = ap.add_subparsers(dest="cmd", required=True)
         p = sub.add_parser("pair", help="show a QR that pairs one phone, then wait for it")
@@ -2958,10 +3029,12 @@ def main():
         st = sub.add_parser("status", help="is the server up, how many phones, what is waiting on you")
         st.add_argument("--json", action="store_true")
         r = sub.add_parser("revoke", help="sign a phone out"); r.add_argument("who")
+        sub.add_parser("fix-boot", help="make the installed unit wait for Tailscale at boot and keep retrying")
         a = ap.parse_args()
-        if a.cmd != "status":
+        if a.cmd not in ("status", "fix-boot"):
             learn_tailnet()   # status only reads, and a bar widget polls it, so it skips the tailscale call
-        sys.exit({"pair": cli_pair, "devices": cli_devices, "revoke": cli_revoke, "status": cli_status}[a.cmd](a))
+        sys.exit({"pair": cli_pair, "devices": cli_devices, "revoke": cli_revoke, "status": cli_status,
+                  "fix-boot": cli_fix_boot}[a.cmd](a))
 
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("port", nargs="?", type=int, default=8742)
