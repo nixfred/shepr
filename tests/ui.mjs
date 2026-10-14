@@ -691,6 +691,40 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     await q.close();
   }
 
+  // ---- the tunnel to the host is down (Tailscale stuck on the phone, 2026-10-14): every read hangs. The app used to sit on the
+  // splash for a minute and then draw an empty page. Now reads give up, the page says it cannot reach the host and how to fix it,
+  // and it fills in by itself once the host answers again.
+  {
+    const q = await ctx.newPage();
+    const jsErrs = []; q.on('pageerror', (e) => jsErrs.push(e.message));   // aborted fetches log network noise; only real exceptions count here
+    let dead = true; const waiting = [];
+    await q.route((u) => u.pathname.includes('/api/') || u.pathname.endsWith('/ping'), async (r) => {
+      const how = dead ? await new Promise((ok) => waiting.push(ok)) : 'go';
+      try { await (how === 'fail' ? r.abort() : r.continue()); } catch (e) { /* the app already gave up on this one */ }
+    });
+    const t0 = Date.now();
+    await q.goto(BASE + '/');
+    const shown = await q.waitForSelector('#nodata', { timeout: 15000 }).then(() => true).catch(() => false);
+    const took = Date.now() - t0;
+    await q.waitForSelector('#splash', { state: 'detached', timeout: 9000 }).catch(() => {});
+    const nd = shown ? await q.evaluate(() => ({ text: document.getElementById('nodata').textContent, btn: !!document.querySelector('#nodata button'),
+      items: document.querySelectorAll('.item').length })) : {};
+    console.log('   no tunnel: the page said', JSON.stringify(nd), 'after', took, 'ms');
+    await q.screenshot({ path: `${OUT}/n1-cannot-reach.png` });
+    check('no tunnel: within 15 s the page says it cannot reach the host, instead of a blank middle', shown && /Can't reach/.test(nd.text) && nd.items === 0);
+    check('no tunnel: it says how to fix it (Tailscale on this phone) and offers Try again', shown && /Tailscale/.test(nd.text) && nd.btn);
+    waiting.splice(0).forEach((ok) => ok('fail'));   // the reads still hanging fail, so only Try again can bring the queue back
+    await q.waitForTimeout(500);
+    const still = !!(await q.$('#nodata button'));
+    dead = false;
+    await q.evaluate(() => document.querySelector('#nodata button').click());
+    const back = await q.waitForSelector('.item', { timeout: 15000 }).then(() => true).catch(() => false);
+    check('no tunnel: once the host answers again, Try again fills the queue and the notice is gone', still && back && !(await q.$('#nodata')));
+    check('no tunnel: no script error on the way (paintMain with no queue used to throw)', jsErrs.length === 0);
+    if (jsErrs.length) console.log('   ' + jsErrs.join('\n   '));
+    await q.close();
+  }
+
   // ---- photos and files: resize on the phone, store on the host, put the path in the message box, send nothing
   {
     const TINY_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');

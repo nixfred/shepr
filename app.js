@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v44';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v45';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -184,7 +184,15 @@ async function api(path, opts) {
     if (!S.dev) { const e = new Error('This phone is not paired yet.'); e.code = 'unpaired'; e.status = 401; throw e; }
     Object.assign(headers, await signHeaders(method, path, body));
   }
-  const r = await fetch(path, { method, headers, body: body || undefined, cache: 'no-store' });
+  // A READ gives up after a while: when the tunnel to the host is down (Tailscale stuck on the phone), iOS lets a fetch
+  // hang for a minute or more, and the app sat on the splash and then a blank page. A write never times out here: one that
+  // timed out may still have landed, and writes are never retried.
+  const ctl = method === 'GET' && typeof AbortController === 'function' ? new AbortController() : null;
+  const tmo = ctl ? setTimeout(() => ctl.abort(), opts.public ? 8000 : 25000) : null;
+  let r;
+  try { r = await fetch(path, { method, headers, body: body || undefined, cache: 'no-store', signal: ctl ? ctl.signal : undefined }); }
+  catch (e) { if (ctl && ctl.signal.aborted) { const t = new Error('The host did not answer in time.'); t.code = 'timeout'; throw t; } throw e; }
+  finally { if (tmo) clearTimeout(tmo); }
   const j = await r.json().catch(() => ({ error: 'bad_response', message: 'HTTP ' + r.status }));
   if (!r.ok || j.error) {
     const e = new Error(j.message || ('HTTP ' + r.status));
@@ -217,7 +225,10 @@ async function syncClock() {
 const netDot = $('net'), banner = $('offline');
 let online = true;
 function ping() {
-  return fetch('ping?t=' + Date.now(), { cache: 'no-store' }).then((r) => r.ok).catch(() => false);
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;   // a dead tunnel must read as "can't reach", not hang
+  const tmo = ctl ? setTimeout(() => ctl.abort(), 8000) : null;
+  return fetch('ping?t=' + Date.now(), { cache: 'no-store', signal: ctl ? ctl.signal : undefined }).then((r) => r.ok).catch(() => false)
+    .finally(() => { if (tmo) clearTimeout(tmo); });
 }
 function setOnline(up) {
   online = up;
@@ -323,7 +334,7 @@ function fetchQueue(fresh) {
       S.skewShown = true;
       notify('This host is running Shepr ' + q.server_build + ' but the app is ' + q.build + '. Restart Shepr on the host, or newer buttons will fail.', true);
     }
-  }).catch((e) => { console.warn('queue fetch failed:', e && e.message, e && e.stack && e.stack.split('\n').slice(0, 3).join(' | ')); if (!e.status) setOnline(false); })
+  }).catch((e) => { console.warn('queue fetch failed:', e && e.message, e && e.stack && e.stack.split('\n').slice(0, 3).join(' | ')); if (!e.status) setOnline(false); if (!S.q) paintMain(); })
     .finally(() => { fetching = null; setTimeout(() => $('mini').classList.remove('busy'), 400); if (fetchAgain) { fetchAgain = false; fetchQueue(true); } });
   return fetching;
 }
@@ -514,6 +525,17 @@ function section(text, n) {
   return s;
 }
 
+// No queue has ever arrived (the host was not reachable when the app opened). The polls keep trying, so the page fills in
+// by itself once the phone can reach the host again.
+function noDataNode() {
+  const e = el('div', 'empty nodata'); e.id = 'nodata';
+  const r = el('div', 'radar tiny'); r.append(el('i'), el('i'), el('i'), el('b'));
+  const host = (S.hello && S.hello.name) || location.hostname.split('.')[0] || 'the host';
+  e.append(r, el('b', null, online ? 'Reading ' + host + '\u2026' : "Can't reach " + host));
+  if (!online) e.append(el('p', null, 'This phone cannot get to it. Check Tailscale on this phone: open the Tailscale app, switch it off, then on again.'),
+                        btn('Try again', 'mini-btn', () => { checkNet(); fetchQueue(true); }));
+  return e;
+}
 function paintMain() {
   const m = $('main');
   const keep = m.scrollTop;
@@ -521,6 +543,7 @@ function paintMain() {
   m.classList.toggle('radarpage', S.tab === 'all');   // the radar page is one fixed screen: the numbers on top, the radar filling the rest
   m.classList.toggle('setpage', S.tab === 'settings');   // Settings is one fixed screen too: four sections behind a bar, each fitting without scrolling
   if (S.tab !== 'subs') BUD.fresh = true;   // the Subs page animates in each time you arrive, not on every refresh
+  if (!S.q && S.tab !== 'settings') { m.append(noDataNode()); return; }   // never a blank page: say the host could not be reached
   if (S.tab === 'waiting') {
     const w = waiting(), d = finished(), ds = finishedSeen(), sl = sleeping(), wk = working();
     if (S.q && S.q.writes) {   // the one big button: a brand-new project (name, folder, the start command)
@@ -2479,7 +2502,7 @@ async function boot() {
   } else if (!S.dev) {
     showPair(S.hello ? null : 'Cannot reach the host. Is Tailscale on?');
   } else {
-    await fetchQueue(true);
+    if (S.hello) await fetchQueue(true); else { fetchQueue(true); paintMain(); }   // host unreachable: show that now, keep trying behind it
     // A link like #gus/w4E:p1 opens that session directly.
     const m = hash.match(/^([^/]+)\/(w[0-9A-Za-z]+:p[0-9A-Za-z]+)$/);
     if (m) openDetail(m[1], m[2], 'all');

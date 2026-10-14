@@ -110,6 +110,8 @@ button{font:inherit;color:inherit}
 .dim{color:var(--dim);font-size:15px}
 .empty{text-align:center;padding:30px 12px;color:var(--dim)}
 .empty b{display:block;color:var(--ok);font-size:19px;margin-bottom:4px}
+.nodata b{color:var(--warn,#f5a524)}
+.nodata p{margin:8px auto 14px;max-width:300px;line-height:1.45}
 
 /* session row */
 .item{display:flex;align-items:center;gap:12px;min-height:64px;padding:10px 12px;border-radius:12px;
