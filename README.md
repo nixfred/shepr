@@ -179,6 +179,8 @@ an agent that blocks buzzes your phone, and the app icon shows how many are wait
 How it works: the host sends an **empty** web push ("something changed"), signed with its own VAPID key (made once, kept `0600`).
 The phone's service worker then asks the host what changed, signed with the phone's key, and shows project names only, never a
 conversation title, because a notification can be read on a locked screen. So nothing about your sessions passes through Apple.
+A finished notice names only the sessions you have not opened yet, the same rule as the Finished list in the app (the app keeps that
+record where the phone's notification worker can read it), so the lock screen never counts a session you already read.
 The host only sends to the real push services (Apple, FCM, Mozilla, Windows), never to an address a phone makes up, never
 follows a redirect, and sends a phone at most one push every 20 seconds. Only blocked and finished states the host watched begin
 count, not what was already true when it started. Revoking a phone removes its subscription. Tapping a notification opens that session.

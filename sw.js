@@ -2,7 +2,7 @@
    Goal: when the tailnet is unreachable, the user sees YOUR app with YOUR message,
    not Safari's error page. It is NOT a general offline database. */
 
-const VERSION = 'shepr-v45';
+const VERSION = 'shepr-v46';
 // The app shell: everything needed to paint a useful screen with no network.
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png'];
 
@@ -77,12 +77,13 @@ self.addEventListener('fetch', (e) => {
 // ---------------------------------------------------------------------------------------------------------------------
 const swEnc = new TextEncoder();
 const swB64u = (buf) => btoa(String.fromCharCode.apply(null, new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-const swDevice = () => new Promise((res, rej) => {
+const swKv = (key) => new Promise((res, rej) => {
   const r = indexedDB.open('shepr', 1);
   r.onupgradeneeded = () => r.result.createObjectStore('kv');
-  r.onsuccess = () => { const g = r.result.transaction('kv', 'readonly').objectStore('kv').get('device'); g.onsuccess = () => res(g.result); g.onerror = () => rej(g.error); };
+  r.onsuccess = () => { const g = r.result.transaction('kv', 'readonly').objectStore('kv').get(key); g.onsuccess = () => res(g.result); g.onerror = () => rej(g.error); };
   r.onerror = () => rej(r.error);
 });
+const swDevice = () => swKv('device');
 async function swSignedGet(dev, path, skew) {
   const ts = String(Math.round(Date.now() + skew));
   const nonce = swB64u(crypto.getRandomValues(new Uint8Array(12)));
@@ -105,17 +106,21 @@ async function swQueue() {
   throw new Error('no answer');
 }
 // Names only, never a conversation title: a notification can be read on a locked screen.
-function swDescribe(q) {
+// "Finished" means finished AND not yet opened, the same rule as the Finished list in the app. A worker cannot read localStorage, so the
+// app mirrors what you have opened into IndexedDB under 'seen' ({"host|pane": {seq}}). Without it the lock screen counted sessions you had read.
+function swDescribe(q, seen) {
+  const mine = seen && typeof seen === 'object' && !Array.isArray(seen) ? seen : {};
+  const unread = (a) => { const e = mine[a.host + '|' + a.pane]; return !(e && e.seq === a.seq); };
   const name = (a) => a.wlabel || a.project || 'a session';
   const list = (l) => { const n = [...new Set(l.map(name))]; return n.slice(0, 3).join(', ') + (n.length > 3 ? ' +' + (n.length - 3) : ''); };
-  const blocked = q.agents.filter((a) => a.status === 'blocked'), done = q.agents.filter((a) => a.status === 'done');
+  const blocked = q.agents.filter((a) => a.status === 'blocked'), done = q.agents.filter((a) => a.status === 'done' && unread(a));
   if (blocked.length) return { title: blocked.length === 1 ? name(blocked[0]) + ' is waiting on you' : blocked.length + ' agents are waiting on you', body: list(blocked), target: blocked[0], count: blocked.length };
   if (done.length) return { title: done.length === 1 ? name(done[0]) + ' finished' : done.length + ' agents finished', body: list(done), target: done[0], count: 0 };
   return { title: 'Shepr', body: 'Nothing is waiting on you now.', target: null, count: 0 };
 }
 self.addEventListener('push', (e) => e.waitUntil((async () => {
   let n = { title: 'Shepr', body: 'An agent needs you. Open Shepr to see which.', target: null, count: null };
-  try { n = swDescribe(await swQueue()); } catch (err) { /* offline, unpaired or rejected: the generic text above still has to be shown */ }
+  try { const q = await swQueue(); n = swDescribe(q, await swKv('seen').catch(() => null)); } catch (err) { /* offline, unpaired or rejected: the generic text above still has to be shown */ }
   await self.registration.showNotification(n.title, { body: n.body, tag: 'shepr-queue', renotify: true, icon: 'icons/icon-192.png',
     data: n.target ? { host: n.target.host, pane: n.target.pane } : {} });
   try {

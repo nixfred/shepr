@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v45';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v46';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -351,8 +351,12 @@ const waiting = () => agents().filter((a) => a.status === 'blocked' && inHost(a)
 // (the state_change_seq), so the next time it finishes it is unread again.
 const seenStore = {
   all() { const d = store.get('shepr.seen', {}); return d && typeof d === 'object' && !Array.isArray(d) ? d : {}; },
-  mark(k, seq) { const d = this.all(); if (d[k] && d[k].seq === seq) return; d[k] = { seq, at: Date.now() }; const ks = Object.keys(d).sort((x, y) => d[y].at - d[x].at); ks.slice(80).forEach((x) => delete d[x]); store.set('shepr.seen', d); },
+  mark(k, seq) { const d = this.all(); if (d[k] && d[k].seq === seq) return; d[k] = { seq, at: Date.now() }; const ks = Object.keys(d).sort((x, y) => d[y].at - d[x].at); ks.slice(80).forEach((x) => delete d[x]); store.set('shepr.seen', d); this.mirror(d); },
+  // The notification worker cannot read localStorage, so the same record is kept in IndexedDB for it: the lock screen then names only the
+  // finished sessions this list calls unread. Best effort: without it the lock screen counts every finished session, as it used to.
+  mirror(d) { kv('set', 'seen', d || this.all()).catch(() => {}); },
 };
+seenStore.mirror();   // once at start, so what was opened before this build reaches the worker too
 const isSeen = (a) => a.status === 'done' && (seenStore.all()[keyOf(a)] || {}).seq === a.seq;
 const finished = () => agents().filter((a) => a.status === 'done' && !isSeen(a) && inHost(a));
 const finishedSeen = () => agents().filter((a) => a.status === 'done' && isSeen(a) && inHost(a));

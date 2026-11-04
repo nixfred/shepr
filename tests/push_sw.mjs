@@ -5,6 +5,7 @@ import { createRequire } from 'module';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import http from 'http';
+import vm from 'vm';
 // Playwright is a global install, not an npm dependency (nixweb rule). Look where a stranger would have it.
 const pw = [process.env.PW_PATH, (process.env.HOME || '') + '/.local/share/mise/installs/npm-playwright/latest/node_modules/', '/usr/local/lib/node_modules/', '/usr/lib/node_modules/']
   .filter(Boolean).map((d) => { try { return createRequire(d)('playwright'); } catch { return null; } }).find(Boolean);
@@ -18,6 +19,24 @@ const res = []; const check = (n, c) => { res.push(!!c); console.log((c ? 'PASS 
 const got = [];
 const pushSvc = http.createServer((rq, rs) => { let n = 0; rq.on('data', (d) => { n += d.length; }); rq.on('end', () => { got.push({ path: rq.url, auth: rq.headers.authorization || '', ttl: rq.headers.ttl, bytes: n }); rs.writeHead(201); rs.end(); }); });
 await new Promise((r) => pushSvc.listen(PUSH_PORT, '127.0.0.1', r));
+
+// The lock screen must agree with the app's Finished list: a finished session you already opened is not announced again.
+// The worker cannot read localStorage, so the app mirrors what you opened into IndexedDB; the worker's wording is tested directly here.
+const swCtx = { self: { addEventListener() {} }, caches: {}, clients: {}, indexedDB: {}, crypto: {}, location: { origin: 'http://localhost' }, fetch() {}, btoa, TextEncoder, URL, Response };
+vm.createContext(swCtx); vm.runInContext(fs.readFileSync(process.env.SW_UNDER_TEST || new URL('../sw.js', import.meta.url), 'utf8'), swCtx);
+const say = swCtx.swDescribe;
+const ag = (pane, status, seq, w) => ({ host: 'gus', pane, status, seq, wlabel: w, project: w });
+const two = { agents: [ag('w1:p1', 'done', 3, 'alpha'), ag('w2:p1', 'done', 9, 'bravo'), ag('w3:p1', 'working', 1, 'charlie')] };
+const d1 = say(two, { 'gus|w1:p1': { seq: 3 } });
+check('lock screen: a finished session you already opened is not announced again', d1.title === 'bravo finished' && d1.body === 'bravo');
+const d2 = say(two, { 'gus|w1:p1': { seq: 3 }, 'gus|w2:p1': { seq: 9 } });
+check('lock screen: when every finished session was opened, it says nothing is waiting, with no names', d2.title === 'Shepr' && /Nothing is waiting/.test(d2.body) && !/alpha|bravo/.test(JSON.stringify(d2)));
+const d3 = say(two, { 'gus|w1:p1': { seq: 2 } });
+check('lock screen: a session that finished AGAIN after you opened it (new seq) is announced', d3.title === '2 agents finished' && d3.body === 'alpha, bravo');
+check('lock screen: no usable record of what you opened (missing, null, a list, a string) behaves as before', [undefined, null, [], 'x'].every((x) => say(two, x).title === '2 agents finished'));
+const d5 = say({ agents: [ag('w1:p1', 'blocked', 4, 'alpha'), ag('w2:p1', 'done', 9, 'bravo')] }, { 'gus|w1:p1': { seq: 4 } });
+check('lock screen: a waiting session is always announced, opened or not', d5.title === 'alpha is waiting on you' && d5.count === 1);
+if (process.env.SW_ONLY) { process.exit(res.every(Boolean) ? 0 : 1); }
 
 const b = await chromium.launch({ executablePath: '/usr/bin/chromium', args: ['--no-sandbox'] });
 const ctx = await b.newContext({ ...devices['iPhone 14'], permissions: ['notifications'] });
@@ -75,6 +94,24 @@ await p.evaluate((d) => navigator.serviceWorker.dispatchEvent(new MessageEvent('
 await p.waitForSelector('#detail:not([hidden])', { timeout: 5000 });
 check('tapping the notification opens that session in the app', (await p.textContent('#dtitle')).length > 0);
 await p.click('#dback').catch(() => {});
+
+// the app keeps that record where the worker can read it
+const mirrored = await p.evaluate(async () => {
+  window.shepr.seenStore.mark('gus|w9:p9', 42);
+  for (let i = 0; i < 20; i++) {
+    const v = await new Promise((res) => { const r = indexedDB.open('shepr', 1); r.onsuccess = () => { const g = r.result.transaction('kv', 'readonly').objectStore('kv').get('seen'); g.onsuccess = () => res(g.result); g.onerror = () => res(null); }; r.onerror = () => res(null); });
+    if (v && v['gus|w9:p9']) return v['gus|w9:p9'].seq;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return null;
+});
+check('opening a finished session writes it to IndexedDB, where the notification worker reads it', mirrored === 42);
+await p.evaluate(({ host, pane }) => { const a = window.shepr.S.q.agents.find((x) => x.host === host && x.pane === pane); window.shepr.seenStore.mark(host + '|' + pane, a.seq); }, n1[0].data);
+await p.waitForTimeout(400);
+await cdp.send('ServiceWorker.deliverPushMessage', { origin: BASE, registrationId: regId, data: '' });
+await p.waitForTimeout(2500);
+const n3 = await shown();
+check('the real worker still announces a waiting session that was marked opened (only finished ones are filtered)', n3.length === 1 && /waiting on you/.test(n3[0].title));
 
 // a phone the host no longer trusts: the push must still show SOMETHING (iOS requires it) but never data
 const me = await p.evaluate(() => window.shepr.S.dev.id);
