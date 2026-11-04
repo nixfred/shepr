@@ -49,6 +49,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 HERE = os.path.dirname(os.path.realpath(__file__))   # realpath: `shepr` is a symlink to this file
 sys.path.insert(0, HERE)   # usage.py sits beside this file, whichever way it was started or imported
 import usage  # noqa: E402
+import live as shepr_live  # noqa: E402   (the Lock Screen Live Activity: ios/ draws it, this feeds it)
 HERDR = os.environ.get("HERDR_BIN", "herdr")
 LOCAL = os.environ.get("SHEPR_LABEL") or socket.gethostname().split(".")[0]
 READONLY = os.environ.get("SHEPR_READONLY") == "1"
@@ -446,6 +447,11 @@ def _publish():
         events = PUSH_EVENTS[:]; PUSH_EVENTS.clear()
     if events:
         threading.Thread(target=dispatch_push, args=(events,), daemon=True).start()
+    if LIVE.active():   # most installs never set the Lock Screen card up: then this is one dict lookup
+        try:
+            LIVE.submit(build_live_status())
+        except Exception as e:   # the card must never stop the queue
+            print(f"shepr: live status failed: {e!r}", file=sys.stderr, flush=True)
 
 
 def _poll_and_publish(h):
@@ -2308,6 +2314,22 @@ USAGE_FIXTURE = os.environ.get("SHEPR_USAGE_FIXTURE")
 USAGE_FIXTURE_MAX = 2_000_000
 METER = usage.Meter(STATE_DIR, CLAUDE_HOME)
 
+# The Lock Screen Live Activity (the optional native app in ios/). The host builds the status once, here, so the phone and the pushes draw the same thing.
+LIVE = shepr_live.Live(STATE_DIR, ecdsa_sign, LOCAL, valid=lambda: set(devices()), locker=state_lock)
+
+
+def build_live_status(now=None):
+    now = now if now is not None else time.time()
+    q = build_queue()
+    return shepr_live.build_status(q["agents"], q["hosts"], shepr_live.meters_from_view(budget_view()), now)
+
+
+def live_call(fn):
+    try:
+        return fn()
+    except shepr_live.LiveError as e:
+        raise HerdrError(e.code, e.message)
+
 
 def budget_view(now=None):
     now = now if now is not None else time.time()
@@ -2676,6 +2698,15 @@ class Handler(SimpleHTTPRequestHandler):
                 if code is None:
                     raise HerdrError("not_subscribed", "this phone is not subscribed, or its push address is not allowed")
                 return self.json_out(200, {"ok": 200 <= code < 300, "status": code})
+            if not post and u.path == "/api/live/status":
+                return self.json_out(200, {"status": build_live_status(), "push": LIVE.push_info(viewer), "host": LOCAL})
+            if post and u.path == "/api/live/register":
+                return self.json_out(200, live_call(lambda: LIVE.register(viewer, body)))
+            if post and u.path == "/api/live/unregister":
+                return self.json_out(200, live_call(lambda: LIVE.unregister(viewer, body.get("id") if isinstance(body.get("id"), str) else None)))
+            if post and u.path == "/api/live/test":
+                res = live_call(lambda: LIVE.test(viewer))
+                return self.json_out(200, {"ok": bool(res) and all(r["code"] == 200 for r in res), "results": res})
             if not post and u.path == "/api/budget":
                 return self.json_out(200, budget_view())
             if not post and u.path == "/api/ledger":
@@ -3080,8 +3111,47 @@ def cli_revoke(a):
     if "err" in res:
         sys.exit(res["err"])
     load_push(); forget_push(res["id"])
+    LIVE.forget(res["id"])
     print(f"revoked {res['name']} ({res['id']}). That phone is signed out now.")
     return 0
+
+
+def cli_live(a):
+    """The Lock Screen Live Activity (the optional native app in ios/). Pushing while the phone is locked needs a paid Apple Developer key."""
+    if a.live_cmd == "setup":
+        try:
+            LIVE.setup(a.key, a.key_id, a.team_id, a.bundle)
+        except (shepr_live.LiveError, OSError) as e:
+            sys.exit(f"shepr: {getattr(e, 'message', e)}")
+        print(f"Apple push key saved ({state_path('AuthKey.p8')}, mode 0600).")
+        print("The host can now update the Lock Screen card while the phone is locked. In the app use the Push build, open it once, and tap Start.")
+        return 0
+    if a.live_cmd == "status":
+        cfg = LIVE.cfg()
+        if LIVE.configured():
+            print(f"Apple push: set up (key {cfg['key_id']}, team {cfg['team_id']}, app {cfg['bundle']})")
+        else:
+            print("Apple push: not set up. It needs a key from a paid Apple Developer Program account: shepr live setup --help")
+        names = {i: d["name"] for i, d in devices().items()}
+        rows = LIVE.summary()
+        for r in rows:
+            print(f"  {names.get(r['device'], r['device'][:6]):<18} push-to-start {'yes' if r['start'] else 'no'}, cards running {r['activities']}, auto-start {'on' if r['auto'] else 'off'}")
+        if not rows:
+            print("  no phone has registered a Live Activity yet")
+        return 0
+    if a.live_cmd == "test":
+        try:
+            res = LIVE.test()
+        except shepr_live.LiveError as e:
+            sys.exit(f"shepr: {e.message}")
+        for r in res:
+            print(f"  {r['device'][:6]}: Apple answered {r['code']}" + (f" {r['reason']}" if r["reason"] else ""))
+        if not res:
+            print("  no card is running on any phone. Tap Start in the app first.")
+        return 0 if res and all(r["code"] == 200 for r in res) else 1
+    gone = LIVE.forget(a.who)
+    print(f"forgot {len(gone)} phone(s)" if gone else "no phone matches that")
+    return 0 if gone else 1
 
 
 class CappedServer(ThreadingHTTPServer):
@@ -3103,7 +3173,7 @@ class CappedServer(ThreadingHTTPServer):
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] in ("pair", "devices", "revoke", "status", "fix-boot"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("pair", "devices", "revoke", "status", "fix-boot", "live"):
         ap = argparse.ArgumentParser(prog="shepr")
         sub = ap.add_subparsers(dest="cmd", required=True)
         p = sub.add_parser("pair", help="show a QR that pairs one phone, then wait for it")
@@ -3115,11 +3185,19 @@ def main():
         st.add_argument("--json", action="store_true")
         r = sub.add_parser("revoke", help="sign a phone out"); r.add_argument("who")
         sub.add_parser("fix-boot", help="make the installed unit wait for Tailscale at boot and keep retrying")
+        lv = sub.add_parser("live", help="the Lock Screen Live Activity: Apple push setup, status, a test card")
+        ls = lv.add_subparsers(dest="live_cmd", required=True)
+        s1 = ls.add_parser("setup", help="give the host your Apple push key (paid Developer Program) so the card updates while the phone is locked")
+        s1.add_argument("--key", required=True, metavar="AuthKey_XXXXXXXXXX.p8"); s1.add_argument("--key-id", required=True, metavar="XXXXXXXXXX")
+        s1.add_argument("--team-id", required=True, metavar="XXXXXXXXXX"); s1.add_argument("--bundle", default="com.nixfred.shepr.live")
+        ls.add_parser("status", help="is Apple push set up, and which phones have a card")
+        ls.add_parser("test", help="send a test card to every running card, to prove the Apple path works")
+        s4 = ls.add_parser("forget", help="drop a phone's Live Activity tokens"); s4.add_argument("who")
         a = ap.parse_args()
-        if a.cmd not in ("status", "fix-boot"):
+        if a.cmd not in ("status", "fix-boot", "live"):
             learn_tailnet()   # status only reads, and a bar widget polls it, so it skips the tailscale call
         sys.exit({"pair": cli_pair, "devices": cli_devices, "revoke": cli_revoke, "status": cli_status,
-                  "fix-boot": cli_fix_boot}[a.cmd](a))
+                  "fix-boot": cli_fix_boot, "live": cli_live}[a.cmd](a))
 
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("port", nargs="?", type=int, default=8742)
@@ -3142,6 +3220,7 @@ def main():
     load_push()
     prune_waits()
     threading.Thread(target=poller, daemon=True).start()
+    threading.Thread(target=LIVE.run, daemon=True).start()   # sends Lock Screen card updates; idle until a phone registers
     if not USAGE_FIXTURE:
         threading.Thread(target=METER.loop, daemon=True).start()   # the subscription meter, on its own slow clock
     handler = functools.partial(Handler, directory=HERE)
