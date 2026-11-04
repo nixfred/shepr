@@ -1,0 +1,104 @@
+# Generated into ShepLive.xcodeproj by XcodeGen:  brew install xcodegen && xcodegen generate
+# Three build configurations:
+#   Free  signs with a free Personal Team. The Live Activity is started and refreshed by this app while it is open.
+#   Push  needs a paid Apple Developer Program team: the host pushes updates through Apple, so the card stays current
+#         while the phone is locked and the app is closed. Debug builds use Apple's sandbox push service.
+#   Release  the same, for TestFlight or ad hoc installs, which use Apple's production push service.
+name: ShepLive
+options:
+  bundleIdPrefix: com.nixfred.shepr
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+configs:
+  Free: debug
+  Push: debug
+  Release: release
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1"
+    SHEP_PUSH: "NO"
+    SHEP_APNS_ENV: sandbox
+  configs:
+    Push:
+      SHEP_PUSH: "YES"
+    Release:
+      SHEP_PUSH: "YES"
+      SHEP_APNS_ENV: production
+packages:
+  ShepLive:
+    path: .
+targets:
+  ShepLive:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes: ["*.entitlements"]
+    dependencies:
+      - package: ShepLive
+        product: ShepLiveKit
+      - target: ShepLiveWidgets
+    info:
+      path: Generated/App-Info.plist
+      properties:
+        CFBundleDisplayName: Shepr Live
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        NSCameraUsageDescription: Shepr Live scans the pairing QR code that `shepr pair` shows.
+        ShepPushEnabled: $(SHEP_PUSH)
+        ShepAPNsEnv: $(SHEP_APNS_ENV)
+        ShepKeychainGroup: $(AppIdentifierPrefix)com.nixfred.shepr.live
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiresFullScreen: true
+        CFBundleURLTypes:
+          - CFBundleURLName: com.nixfred.shepr.live
+            CFBundleURLSchemes: [shepr-live]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nixfred.shepr.live
+        CODE_SIGN_ENTITLEMENTS: App/ShepLive.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO
+      configs:
+        Push:
+          CODE_SIGN_ENTITLEMENTS: App/ShepLivePush.entitlements
+        Release:
+          CODE_SIGN_ENTITLEMENTS: App/ShepLiveRelease.entitlements
+  ShepLiveWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Widgets
+        excludes: ["*.entitlements"]
+    dependencies:
+      - package: ShepLive
+        product: ShepLiveKit
+      - sdk: SwiftUI.framework
+      - sdk: WidgetKit.framework
+    info:
+      path: Generated/Widgets-Info.plist
+      properties:
+        CFBundleDisplayName: Shepr Live
+        ShepKeychainGroup: $(AppIdentifierPrefix)com.nixfred.shepr.live
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nixfred.shepr.live.widgets
+        CODE_SIGN_ENTITLEMENTS: Widgets/Widgets.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+schemes:
+  ShepLive:
+    build:
+      targets:
+        ShepLive: all
+    run:
+      config: Free
+    archive:
+      config: Release

@@ -1,0 +1,59 @@
+{
+ "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+ "nonce": "000102030405060708090a0b",
+ "plain": "{\"v\":1,\"t\":1700000000,\"b\":2,\"d\":1,\"w\":1,\"i\":2,\"z\":2,\"h\":[{\"n\":\"gus\",\"o\":true},{\"n\":\"vic\",\"o\":false}],\"r\":[{\"n\":\"pipeline\",\"h\":\"gus\",\"s\":\"b\",\"a\":1699999300},{\"n\":\"herder.remote.iphone\",\"h\":\"gus\",\"s\":\"b\",\"a\":1699999900},{\"n\":\"mkimage\",\"h\":\"vic\",\"s\":\"d\",\"a\":1699999700},{\"n\":\"sigkill\",\"h\":\"gus\",\"s\":\"w\",\"a\":0}],\"m\":[{\"n\":\"Claude\",\"l\":\"5h\",\"p\":63,\"e\":1700005400}]}",
+ "status": {
+  "v": 1,
+  "t": 1700000000,
+  "b": 2,
+  "d": 1,
+  "w": 1,
+  "i": 2,
+  "z": 2,
+  "h": [
+   {
+    "n": "gus",
+    "o": true
+   },
+   {
+    "n": "vic",
+    "o": false
+   }
+  ],
+  "r": [
+   {
+    "n": "pipeline",
+    "h": "gus",
+    "s": "b",
+    "a": 1699999300
+   },
+   {
+    "n": "herder.remote.iphone",
+    "h": "gus",
+    "s": "b",
+    "a": 1699999900
+   },
+   {
+    "n": "mkimage",
+    "h": "vic",
+    "s": "d",
+    "a": 1699999700
+   },
+   {
+    "n": "sigkill",
+    "h": "gus",
+    "s": "w",
+    "a": 0
+   }
+  ],
+  "m": [
+   {
+    "n": "Claude",
+    "l": "5h",
+    "p": 63,
+    "e": 1700005400
+   }
+  ]
+ },
+ "sealed": "AAECAwQFBgcICQoL8tl+IhMmiWLDoQXCry0+U/lAgtdhWI/bxK0d6VekhAbdrA6ExCSAtBVbVOJXuK1ZXL6bWN9AmqFJw/tpsnW8sQwLnuHHew7TsGQ42WVQp9O0/H0QGQOTHCJ1nyziG2PTPrsRrtv7VdaLAIiVzLONopkGJl3lNC6dbUEWt1sFnSHUFeGRi0D9VmtxXVYOXUkAhUe+SzJW9W0C0dod3znOGwWb6Y3PIPGUoAwDfQjFii63JM4leT5YOfp3zKtFUeFj+2t9/EHHLX0PZAdv73xcO1vh/AVfNp9nawVXh5U4Rt8BKGPd79dgwvbYYGSROuLlk32H2hhZkLzaokf5hN87E7WoO7BQfYGkq6ezPEif/NTXcc2xfaAQxTlKXwQ3WJsxUlx7NNVO0m8iAHz5tml4OQkK9vqPq1y0TMc4rQBZTOpuP/thfH69vIPOR6wirLCWTNyqYpZbUfYFbXmxMOt1CFhdOAtJAB8bQNPJkNISiQjKiffd7cen7g=="
+}

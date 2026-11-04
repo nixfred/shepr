@@ -185,6 +185,24 @@ The host only sends to the real push services (Apple, FCM, Mozilla, Windows), ne
 follows a redirect, and sends a phone at most one push every 20 seconds. Only blocked and finished states the host watched begin
 count, not what was already true when it started. Revoking a phone removes its subscription. Tapping a notification opens that session.
 
+### Lock Screen card (optional, a small native app)
+
+A Home Screen web app cannot draw anything on the Lock Screen except a notification and a badge, so a big live status card needs a
+native iPhone app. `ios/` holds one, **Shepr Live**, with a Live Activity that shows the whole board at a glance: how many sessions
+are waiting on you, finished and working, each session's name with a clock that counts up while it waits, which hosts answer, and
+your plan meters. It is read-only: nothing on it answers an agent, and a tap only opens the app. Apple allows a card 160 points of
+height, so it names the five most urgent sessions and counts the rest.
+
+![The card as iOS draws it: two sessions waiting, one finished, three working, with clocks that count up by themselves](docs/img/live-lock-system.png)
+
+*A capture from the iOS 27.2 Simulator, with made-up sessions. The clocks count up on their own, with no update from anywhere.*
+
+How it stays current depends on your Apple account. With a free Apple ID the card refreshes while the app is open. With a paid
+Apple Developer Program key (`shepr live setup`) the host pushes updates through Apple, so the card stays current while the phone is
+locked and starts by itself when an agent blocks. Nothing readable passes through Apple: each update is sealed with
+ChaCha20-Poly1305 under a key only the host and the phone's Lock Screen extension hold. Build, pairing and the Apple key are in
+[ios/README.md](ios/README.md). `shepr live status` shows whether it is set up, and `shepr live test` pushes a test card.
+
 ### Waiting ledger
 
 A slim strip under **Start new** shows how long agents sat blocked on you today (`TODAY 4 waits · 1h 12m`, longest, and a 7-day
@@ -316,7 +334,7 @@ Every setting is an environment variable on the server. Nothing needs setting fo
 | `SHEPR_VAPID_SUB` | this repository's address | The contact the push service sees. |
 | `SHEPR_AWAIT_CLEAR_S` | `5` | How many seconds Skip and send waits for a question to close before it gives up and sends nothing. |
 
-The tests also use `SHEPR_LOCAL_ONLY`, `SHEPR_PUSH_ALLOW` and `SHEPR_USAGE_FIXTURE`. They are not for normal use.
+The tests also use `SHEPR_LOCAL_ONLY`, `SHEPR_PUSH_ALLOW`, `SHEPR_USAGE_FIXTURE` and `SHEPR_APNS_URL`. They are not for normal use.
 
 ## Honest limits
 
@@ -339,6 +357,14 @@ The tests also use `SHEPR_LOCAL_ONLY`, `SHEPR_PUSH_ALLOW` and `SHEPR_USAGE_FIXTU
   a paired phone, and pairing needs a one-time code from `shepr pair`.
 - Shepr polls every machine that is enabled in your herdr config. Machines you add from the Hosts tab are limited to
   your own tailnet nodes, but one you added to herdr by hand is yours to vouch for.
+- The Lock Screen card is a separate native app (`ios/`). Apple ends a card after 8 hours (it leaves the Lock Screen at most 4 hours
+  later), allows 160 points of height and 4 KB per update, and budgets pushes per hour, so the host spends the immediate kind only
+  when an agent starts or stops waiting on you. A free Apple ID cannot receive pushes: there the card refreshes only while Shepr
+  Live is open. Tested: the card in the iOS 27.2 Simulator (iOS draws the Lock Screen presentation with the whole status and
+  counting clocks, and the compact and expanded Dynamic Island show the counts and three rows), its layout at both iPhone Lock
+  Screen widths, the cipher against RFC 8439, the `cryptography` library and Apple's CryptoKit, the app's signed requests against
+  the real server, the host's pushes against a local stand-in for Apple. Not tested: a real push through Apple's servers (it
+  needs a paid account) and a real iPhone.
 
 ## Layout
 
@@ -346,6 +372,8 @@ The tests also use `SHEPR_LOCAL_ONLY`, `SHEPR_PUSH_ALLOW` and `SHEPR_USAGE_FIXTU
 server.py            static files, /ping, /api, and the shepr CLI (pair|devices|revoke|status). Standard library only.
 manifest.json        the Omarchy plugin: Service.qml (asks the CLI), BarWidget.qml (the badge), ShepPanel.qml (the panel), preview.png
 usage.py             the subscription meter: Claude, Codex, Grok and Kimi plan usage, measured on the host. Standard library only.
+live.py              feeds the Lock Screen card: builds the status, seals it, pushes it to Apple (curl speaks HTTP/2). Standard library only.
+ios/                 the optional native companion, Shepr Live and its Live Activity (Swift, Apple frameworks only). See ios/README.md.
 index.html app.css app.js sw.js manifest.webmanifest
 icons/               logo.svg, app icons, launch images (iOS shows these before any code runs)
 vendor/jsQR.js       the one third-party file: Safari has no BarcodeDetector. Apache-2.0, see vendor/README.md
@@ -353,7 +381,7 @@ docs/img/            the graphics above (hand-built SVG) and real screenshots
 tests/               the UI suite (ui.mjs), the Python and node suites listed under Testing, fake-session.sh, shots.mjs
 ```
 
-State: `~/.local/state/shepr/` (`devices.json`, `seen.json`, `pairing.json`, `usage-samples.jsonl`, `sends.jsonl` audit log), mode 0600.
+State: `~/.local/state/shepr/` (`devices.json`, `seen.json`, `pairing.json`, `usage-samples.jsonl`, `sends.jsonl` audit log, and for the Lock Screen card `live.json`, `apns.json`, `AuthKey.p8`), mode 0600.
 Logs: `journalctl --user -u shepr -f`. The app shell is fetched network-first (2.5 s, then
 cache) so a change shows on the next open and the app still opens offline.
 The host also announces the current build (`/api/hello`, `/api/queue`). A Home Screen app can stay alive in iOS
@@ -373,8 +401,9 @@ export SHEPR_USAGE_FIXTURE=/tmp/claude-1000/shepr-usage.json   # the Subs page r
 export SHEPR_CLAUDE_CMD='echo STARTED' SHEPR_CODEX_CMD='echo CODEX' SHEPR_NEW_CMD='echo CCC' SHEPR_PROJECTS=/tmp/shepr-projects SHEPR_PUSH_ALLOW=127.0.0.1:9988
 python3 server.py 8743 &
 node tests/ui.mjs; node tests/small_screen.mjs; node tests/sw_offline.mjs; node tests/push_sw.mjs; node tests/format.mjs; node tests/draft_commit.mjs; python3 tests/pair_cli_test.py
-for t in menu_parse server_hardening history push usage ledger status qr_secret; do python3 tests/${t}_test.py; done   # pure Python, no server needed
+for t in menu_parse server_hardening history push usage ledger status qr_secret live; do python3 tests/${t}_test.py; done   # pure Python, no server needed
 node tests/shots.mjs                           # regenerates docs/img/screens.png from the RUNNING app
+(cd ios && swift test && swift run shepr-live-render /tmp/shepr-render)   # macOS with Xcode: the Lock Screen card, and a 160 pt height check
 tests/fake-session.sh down
 ```
 

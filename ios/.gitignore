@@ -1,0 +1,6 @@
+.build/
+.swiftpm/
+ShepLive.xcodeproj/
+Generated/
+render-out/
+*.key
