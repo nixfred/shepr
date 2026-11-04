@@ -786,6 +786,86 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     check('photos: at most ten at a time', (await page.$$eval('.at-row', (n) => n.length)) === 10 && await page.$eval('.at-more', (b) => b.disabled));
     await page.click('#sheet .btns button:not(.go)'); await page.waitForTimeout(300);
     check('photos: attached, removed or cancelled, no thumbnail is left holding a photo in memory', (await page.evaluate(() => window.__liveUrls.size)) === 0);
+    // ---- paste a photo into the message box: it opens the same sheet as the camera button
+    {
+      const paste = (files, text, sel = '#msg') => page.evaluate(({ files, text, sel }) => {
+        const dt = new DataTransfer();
+        files.forEach((f) => dt.items.add(new File([new Uint8Array(f.bytes)], f.name, { type: f.type })));
+        if (text) dt.setData('text/plain', text);
+        const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+        document.querySelector(sel).dispatchEvent(ev);
+        return ev.defaultPrevented;
+      }, { files: files.map((f) => ({ ...f, bytes: Array.from(f.bytes) })), text, sel });
+      const sheetOpen = () => page.evaluate(() => !document.getElementById('sheet').hidden && !!document.querySelector('#sheet .at-row'));
+      const png = { name: 'image.png', type: 'image/png', bytes: TINY_PNG };
+      await page.fill('#msg', 'note first');
+      let prevented = await paste([png]);
+      await page.waitForSelector('#sheet:not([hidden]) .at-row');
+      check('paste: an image pasted into the message box opens the attach sheet, and the browser does not also type it', prevented === true && /Attach 1 photo/.test(await page.textContent('#sheet h3')) && (await page.inputValue('#msg')) === 'note first');
+      check('paste: the pasted photo is named as a photo and has a thumbnail', /photo\.png/.test(await page.textContent('#sheet .at-n')) && (await page.$$eval('.at-row .at-th img', (n) => n.length)) === 1);
+      await page.click('#at-go');
+      await page.waitForFunction(() => /\/uploads\/.+\.png/.test(document.getElementById('msg').value) && document.getElementById('sheet').hidden, null, { timeout: 12000 });
+      const pm = (await page.inputValue('#msg')).split('\n').filter(Boolean);
+      check('paste: after Attach the box keeps what was typed and gets the saved path under it', pm[0] === 'note first' && /\/uploads\/\d{4}-\d{2}-\d{2}\/[0-9a-f]{16}\.png$/.test(pm[1]));
+      check('paste: the file on the host is the pasted PNG and private (0600)', fs.existsSync(pm[1]) && Buffer.compare(fs.readFileSync(pm[1]), TINY_PNG) === 0 && (fs.statSync(pm[1]).mode & 0o777) === 0o600);
+      prevented = await paste([png, { name: 'image.png', type: 'image/png', bytes: PNG2 }]);
+      await page.waitForSelector('#sheet:not([hidden]) .at-row');
+      check('paste: two images give two rows', prevented === true && /Attach 2 photos/.test(await page.textContent('#sheet h3')) && (await page.$$eval('.at-row', (n) => n.length)) === 2);
+      await page.click('#sheet .btns button:not(.go)'); await page.waitForTimeout(300);
+      check('paste: cancelling leaves no thumbnail holding a photo in memory', (await page.evaluate(() => window.__liveUrls.size)) === 0);
+      prevented = await paste([], 'just some words');
+      check('paste: plain text is left alone, so the browser types it', prevented === false && !(await sheetOpen()));
+      prevented = await paste([png], 'Here is the screenshot we talked about');
+      check('paste: an image that arrives with real text is a text paste, not an attachment', prevented === false && !(await sheetOpen()));
+      prevented = await paste([png], 'https://example.com/pic.png');
+      await page.waitForSelector('#sheet:not([hidden]) .at-row');
+      check('paste: a copied image that carries its URL as text is still a photo', prevented === true && (await sheetOpen()));
+      await page.click('#sheet .btns button:not(.go)'); await page.waitForTimeout(300);
+      prevented = await paste([{ name: 'evil.exe', type: 'application/octet-stream', bytes: Buffer.from('MZ\x90\x00 not allowed') }]);
+      check('paste: a file type Shepr does not accept is not taken over and opens nothing', prevented === false && !(await sheetOpen()));
+      prevented = await paste(Array.from({ length: 12 }, () => png));
+      await page.waitForSelector('#sheet:not([hidden]) .at-row');
+      check('paste: more than ten images keep ten and say so', prevented === true && (await page.$$eval('.at-row', (n) => n.length)) === 10 && /Up to 10 at a time/.test(await page.textContent('#toast')));
+      await page.click('#sheet .btns button:not(.go)'); await page.waitForTimeout(300);
+      check('paste: no thumbnail is left holding a photo in memory after all of that', (await page.evaluate(() => window.__liveUrls.size)) === 0);
+      // ---- touch and hold the camera button: "Paste a photo", for an iPhone, where a plain text box does not always offer Paste for a picture
+      const mouseHold = async (ms) => { const [x, y] = await page.$eval('#attachbtn', (n) => { const r = n.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }); await page.mouse.move(x, y); await page.mouse.down(); await page.waitForTimeout(ms); await page.mouse.up(); };
+      let choosers = 0; const onChooser = () => { choosers++; }; page.on('filechooser', onChooser);
+      await page.click('#attachbtn'); await page.waitForTimeout(300);
+      check('paste sheet: a plain tap on the camera button still opens the picker, not the paste sheet', choosers === 1 && !(await page.$('#sheet .pastebox')));
+      await mouseHold(700);
+      await page.waitForSelector('#sheet:not([hidden]) .pastebox');
+      check('paste sheet: touching and holding the camera button opens Paste a photo, and the picker does not also open', choosers === 1 && /Paste a photo/.test(await page.textContent('#sheet h3')));
+      page.off('filechooser', onChooser);
+      check('paste sheet: the box takes a paste but brings up no keyboard and takes no typing', await page.$eval('.pastebox', (n) => n.isContentEditable && n.getAttribute('inputmode') === 'none'));
+      check('paste sheet: Cancel and Paste from clipboard are both on screen', await page.evaluate(() => { const b = document.querySelector('#sheet .btns'); return b.getBoundingClientRect().bottom <= innerHeight && b.querySelectorAll('button').length === 2; }));
+      prevented = await paste([], 'only some words', '.pastebox');
+      await page.waitForFunction(() => /not a photo/.test(document.getElementById('toast').textContent), null, { timeout: 3000 });
+      check('paste sheet: pasting text into the box says it was not a photo and the sheet stays', prevented === true && !!(await page.$('#sheet .pastebox')));
+      prevented = await paste([png], '', '.pastebox');
+      await page.waitForSelector('#sheet:not([hidden]) .at-row');
+      check('paste sheet: pasting a picture into the box opens the attach sheet with it', prevented === true && /Attach 1 photo/.test(await page.textContent('#sheet h3')) && !(await page.$('.pastebox')));
+      await page.click('#sheet .btns button:not(.go)'); await page.waitForTimeout(300);
+      // the button that reads the clipboard directly (stubbed: a headless browser has no photo on its clipboard)
+      const stubClip = (kind) => page.evaluate(({ kind, bytes }) => {
+        const mk = { image: () => [new ClipboardItem({ 'image/png': new Blob([new Uint8Array(bytes)], { type: 'image/png' }) })], text: () => [new ClipboardItem({ 'text/plain': new Blob(['hi'], { type: 'text/plain' }) })],
+          denied: () => { throw new DOMException('no', 'NotAllowedError'); } }[kind];
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { read: async () => mk() } });
+      }, { kind, bytes: Array.from(TINY_PNG) });
+      await stubClip('image'); await mouseHold(700); await page.waitForSelector('#sheet:not([hidden]) .pastebox');
+      await page.click('#sheet .btns .go'); await page.waitForSelector('#sheet:not([hidden]) .at-row');
+      check('paste sheet: Paste from clipboard turns a picture on the clipboard into an attachment', /Attach 1 photo/.test(await page.textContent('#sheet h3')) && /photo\.png/.test(await page.textContent('#sheet .at-n')));
+      await page.click('#sheet .btns button:not(.go)'); await page.waitForTimeout(300);
+      await stubClip('text'); await mouseHold(700); await page.waitForSelector('#sheet:not([hidden]) .pastebox'); await page.click('#sheet .btns .go');
+      await page.waitForFunction(() => /no photo on the clipboard/.test(document.getElementById('toast').textContent), null, { timeout: 3000 });
+      check('paste sheet: a clipboard with no picture says so and nothing opens', !!(await page.$('#sheet .pastebox')) && !(await page.$('#sheet .at-row')));
+      await stubClip('denied'); await page.click('#sheet .btns .go');
+      await page.waitForFunction(() => /Allow Paste/.test(document.getElementById('toast').textContent), null, { timeout: 3000 });
+      check('paste sheet: when iOS does not allow the read, it says what to do', /Allow Paste/.test(await page.textContent('#toast')) && !!(await page.$('#sheet .pastebox')));
+      await page.click('#sheet .btns button:not(.go)'); await page.waitForTimeout(300);
+      await page.evaluate(() => { delete navigator.clipboard; });   // give the real clipboard back to the tests that follow
+      check('paste sheet: no thumbnail is left holding a photo in memory', (await page.evaluate(() => window.__liveUrls.size)) === 0);
+    }
     await page.fill('#msg', 'keep this');
     const big = await page.evaluate(async () => { const c = document.createElement('canvas'); c.width = 3200; c.height = 2400; const x = c.getContext('2d');
       for (let i = 0; i < 40; i++) { x.fillStyle = `hsl(${i * 9},80%,50%)`; x.fillRect(i * 80, (i % 7) * 340, 300, 600); }

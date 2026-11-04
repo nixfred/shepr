@@ -706,6 +706,8 @@ button{font:inherit;color:inherit}
 .at-n{font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .at-c{display:block;width:100%;min-width:0;resize:none;padding:8px 10px;font:16px/1.3 -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;background:#060b12;border:1px solid var(--line);color:var(--txt);border-radius:8px;overflow-y:auto}
 .at-c:focus{outline:none;border-color:var(--accent)}
+.pastebox{min-height:120px;margin:8px 0 12px;padding:16px;display:flex;align-items:center;justify-content:center;text-align:center;border:1px dashed var(--accent);border-radius:14px;background:#060b12;color:var(--dim);font-size:15px;line-height:1.35;outline:none;-webkit-user-select:text;user-select:text;-webkit-touch-callout:default}
+.pastebox:focus{border-style:solid}
 .at-x{width:38px;height:38px;font-size:22px;line-height:1;background:none;border:1px solid var(--line);color:var(--dim);border-radius:8px}
 .at-more{width:100%;min-height:42px;margin-bottom:6px;background:none;border:1px dashed var(--accent);color:var(--accent);font-weight:700;border-radius:10px}
 .at-more:disabled{opacity:.4}

@@ -165,6 +165,12 @@ runs `mkdir`. It works on the machine Shepr runs on, so other machines are not l
 ### Photos and files
 
 The camera button next to the message box attaches photos, a PDF or plain text files (`txt md log json csv`) from your phone: pick up to ten at once, give each its own comment, add more, or remove one before it uploads.
+You can also paste a photo you copied, in Photos, as a screenshot, or as an image in Safari: touch and hold the camera button, then touch and hold the box that appears and tap Paste, or tap Paste from clipboard (iOS asks once to allow it). It opens the same sheet. An iPhone does not always offer Paste in an ordinary text box for a picture, which is why the box is there. On an iPad with a keyboard or on a computer, pasting straight into the message box works too, and pasting text works as always.
+
+![Touch and hold the camera button for Paste a photo, then the attach sheet with the pasted picture](docs/img/paste-sheets.png)
+
+*Captured from the running app against an isolated test session. The picture and the agent are made up.*
+
 A photo is shrunk to 2000 px on the phone first (a PNG screenshot under 4 MB is sent as is, so text stays sharp). It is uploaded
 signed, to this host only, checked by its first bytes rather than its name or the type the phone claims (programs and scripts
 are refused), stored `0600` under `~/.local/state/shepr/uploads/<date>/` with a random name, and **deleted after a week**

@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v46';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v47';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -2092,15 +2092,70 @@ async function prepareUpload(file) {
 const ATT_MAX = 10;
 const ATT = { items: [], to: null, busy: false, urls: [] };
 $('filepick').multiple = true;
-$('attachbtn').addEventListener('click', () => { if (S.cur) { ATT.add = false; $('filepick').click(); } });
-$('filepick').addEventListener('change', () => {
-  const files = Array.from($('filepick').files || []); $('filepick').value = '';
+// A tap on the camera button opens the picker. Touching and holding it (a little under half a second) opens "Paste a photo", for a picture
+// you copied (in Photos, a screenshot, an image in Safari). An iPhone does not always offer Paste in a plain text box when only a picture
+// is on the clipboard, so that sheet has a box iOS does let you paste a picture into, and a button that reads the clipboard directly.
+let attHeld = false, attTimer = null;
+$('attachbtn').addEventListener('pointerdown', () => { attHeld = false; clearTimeout(attTimer); attTimer = setTimeout(() => { attTimer = null; if (S.cur && !ATT.busy) { attHeld = true; openPasteSheet(); } }, 450); });
+['pointerup', 'pointercancel', 'pointerleave'].forEach((ev) => $('attachbtn').addEventListener(ev, () => { clearTimeout(attTimer); attTimer = null; }));
+$('attachbtn').addEventListener('click', () => { if (attHeld) { attHeld = false; return; } if (S.cur) { ATT.add = false; $('filepick').click(); } });
+// One way in for every source of files (the picker, and a paste into the message box): they join the batch and the sheet opens.
+function attAdd(files) {
   if (!files.length || !S.cur) return;
   if (!ATT.add || !ATT.to) { attDrop(); ATT.to = { host: S.cur.host, pane: S.cur.pane }; }
-  files.forEach((f) => { if (ATT.items.length < ATT_MAX) ATT.items.push({ file: f, comment: '', path: null, url: null }); });
-  if (files.length + (ATT.items.length - files.length) > ATT_MAX) notify('Up to ' + ATT_MAX + ' at a time.', true);
+  const room = Math.max(0, ATT_MAX - ATT.items.length);
+  files.slice(0, room).forEach((f) => ATT.items.push({ file: f, comment: '', path: null, url: null }));
+  if (files.length > room) notify('Up to ' + ATT_MAX + ' at a time.', true);
   openAttachSheet();
+}
+$('filepick').addEventListener('change', () => { const files = Array.from($('filepick').files || []); $('filepick').value = ''; attAdd(files); });
+// Paste a photo into the message box: copy it in Photos, take a screenshot, or copy an image in Safari, then long-press the box and
+// tap Paste. It opens the same sheet as the camera button, so the comment, the upload and "nothing is sent until you press Send"
+// are the same. A paste of text is left alone, and so is an image that arrives with real text (rich text from Notes or a web page).
+const PASTE_OK = (f) => /^image\//.test(f.type) || f.type === 'application/pdf' || /\.(heic|heif|jpe?g|png|gif|webp|pdf|txt|md|log|json|csv)$/i.test(f.name || '');
+function pastedFiles(dt) {
+  if (!dt) return [];
+  let files = Array.from(dt.files || []);
+  if (!files.length && dt.items) files = Array.from(dt.items).filter((i) => i.kind === 'file').map((i) => i.getAsFile()).filter(Boolean);
+  return files.filter(PASTE_OK);
+}
+$('msg').addEventListener('paste', (e) => {
+  const files = pastedFiles(e.clipboardData);
+  if (!files.length || !S.cur) return;
+  const text = (e.clipboardData.getData('text/plain') || '').trim();
+  if (text && !/^(https?:\/\/\S+|\S+\.(heic|heif|jpe?g|png|gif|webp))$/i.test(text)) return;   // a copied image can carry its URL or file name as text
+  e.preventDefault();
+  ATT.add = false; attAdd(files);
 });
+function openPasteSheet() {
+  if (!S.cur) return;
+  const box = el('div', 'attsheet'), pad = el('div', 'pastebox', 'Touch and hold here, then tap Paste');
+  box.append(el('h3', null, 'Paste a photo'), el('div', 'sub', 'Copy a photo or a screenshot first. It goes into the message box as a file, and nothing is sent until you press Send.'), pad);
+  pad.contentEditable = 'true'; pad.setAttribute('role', 'textbox'); pad.setAttribute('aria-label', 'Paste a photo here'); pad.setAttribute('inputmode', 'none');   // no keyboard
+  pad.addEventListener('beforeinput', (e) => { if (e.inputType !== 'insertFromPaste') e.preventDefault(); });   // nothing can be typed into it, only pasted
+  pad.addEventListener('paste', (e) => {
+    e.preventDefault();
+    const files = pastedFiles(e.clipboardData);
+    if (!files.length) { notify('That was not a photo.', true); return; }
+    closeSheet(); ATT.add = false; attAdd(files);
+  });
+  const row = el('div', 'btns');
+  row.append(btn('Cancel', '', closeSheet));
+  if (navigator.clipboard && navigator.clipboard.read) row.append(btn('Paste from clipboard', 'go', pasteFromClipboard));
+  box.append(row); openSheet(box);
+}
+// Reads the clipboard directly (iOS asks you to allow the paste). It must run from a tap, which is why it is a button.
+async function pasteFromClipboard() {
+  try {
+    const files = [];
+    for (const item of await navigator.clipboard.read()) {
+      const type = item.types.find((t) => /^image\//.test(t));
+      if (type) { const b = await item.getType(type); files.push(new File([b], 'image.' + (type.split('/')[1] || 'png').replace('jpeg', 'jpg'), { type })); }
+    }
+    if (!files.length) { notify('There is no photo on the clipboard.', true); return; }
+    closeSheet(); ATT.add = false; attAdd(files);
+  } catch (e) { notify(e && e.name === 'NotAllowedError' ? 'Allow Paste when iOS asks, then try again.' : 'Could not read the clipboard.', true); }
+}
 // A thumbnail holds the whole photo in memory until its object URL is revoked, so every way the photos go (cancelled, replaced,
 // attached) revokes them; a few cancelled camera photos would otherwise stay in memory until the page reloads.
 function attDrop() { ATT.items = []; ATT.urls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ } }); ATT.urls = []; }
