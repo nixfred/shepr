@@ -64,7 +64,11 @@ check("the last 7 days: seven entries, oldest first, ending today, each with its
 check("a wait from 10 days ago is not in the week", all(t["label"] != "ancient" for t in v["today"]["top"]) and sum(d["n"] for d in v["days"]) == 6)
 check("waiting right now: how many agents are blocked and for how long in all", v["now"] == {"n": 2, "secs": 720})
 # pruning
-srv.record_wait("gus", "old", mid - 40 * 86400 - 600, mid - 40 * 86400)
-n0 = len(srv.read_waits(0)); srv.prune_waits(); n1 = len(srv.read_waits(0))
-check("waits older than 30 days are dropped when the host starts", n1 == n0 - 1 and all(w["label"] != "old" for w in srv.read_waits(0)))
+# pruning works on the real clock (the fixture above is pinned to 2026-10-10), so these two are placed relative to now
+real = time.time()
+srv.record_wait("gus", "old", real - 40 * 86400 - 600, real - 40 * 86400)
+srv.record_wait("gus", "recent", real - 3 * 86400 - 600, real - 3 * 86400)
+srv.prune_waits()
+check("waits older than 30 days are dropped when the host starts, newer ones stay",
+      all(w["label"] != "old" for w in srv.read_waits(0)) and any(w["label"] == "recent" for w in srv.read_waits(0)))
 sys.exit(0 if ok else 1)
