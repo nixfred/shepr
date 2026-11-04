@@ -617,6 +617,9 @@ def parse_menu(text):
         question = l[:200]
         break
     out = {"current": cur_n or 0, "cur_idx": cur_idx, "options": opts, "multi": multi, "question": question}
+    # A form with several questions draws a tab bar above its question, and so does its review step. Esc on any step of it cancels the
+    # WHOLE form: every answer given so far is thrown away and the agent is told you declined.
+    out["form"] = any((_tb := lines[i].strip().lstrip("│|").strip()) and _tb[0] in "←→☐☒✔" for i in range(max(0, run[0][0] - 14), run[0][0]))
     if multi:
         out["action"] = {"label": act[1], "idx": next(k for k, r in enumerate(rows) if r[0] == "act"), "focused": act[2]}
     return out
@@ -700,7 +703,11 @@ def build_plan(body):
             # in only once the agent has left "blocked", as an ordinary prompt, so they may be several lines. Never sent to an agent
             # that is not blocked: Esc would interrupt its work.
             steps = [{"op": "keys", "keys": ["esc"]}, {"op": "await_clear"}, {"op": "prompt", "text": text}]
+            in_form = (parse_menu(read_tail(host, pane, 80)) or {}).get("form")
             lines = [("Closes the question", "Esc. Nothing is answered or approved. If it is a permission request, this refuses it."),
+                     ("Careful", "This question is a step of a form with several questions. Esc cancels the WHOLE form: every answer you already gave to it is thrown away and the agent is told you declined."
+                                 if in_form else
+                                 "If this question is one of several in a form, Esc cancels the whole form and throws away the answers you already gave to it."),
                      ("Then sends as a prompt", text)]
         elif status == "blocked":
             if "\n" in text:
@@ -714,8 +721,8 @@ def build_plan(body):
                     raise HerdrError("menu_text", "this question takes a numbered pick, so typed words would be read as keystrokes. Tap an option instead.")
                 if menu.get("multi"):
                     ticked = [o["n"] for o in menu["options"] if o["checked"] and not o["free"] and o["n"] <= 9]
-                    return build_plan(dict(body, kind="multi", picks=ticked, advance=True, text=text))
-                return build_plan(dict(body, kind="choose", option=free["n"], text=text))
+                    return build_plan(dict(body, kind="multi", picks=ticked, advance=True, text=text, from_box=True))
+                return build_plan(dict(body, kind="choose", option=free["n"], text=text, from_box=True))
             steps = [{"op": "text", "text": text}, {"op": "keys", "keys": ["enter"]}]
             lines = [("Types into the dialog", text), ("Then presses", "⏎")]
             bare_text = True
@@ -788,6 +795,8 @@ def build_plan(body):
             steps = [{"op": "keys", "keys": keys}]
             approves = opt["approves"]
             lines = [("Picks", f"{n}. {opt['label']}"), ("By pressing", human_keys(keys))]
+        if menu.get("question"):   # which question this answers: a form asks several, and words can land on a different one than you meant
+            lines.insert(0, ("Answers", menu["question"]))
     elif kind == "multi":
         if status != "blocked":
             raise HerdrError("not_blocked", "ticking options only applies to a blocked agent")
@@ -842,6 +851,8 @@ def build_plan(body):
                                              for o in menu["options"] if o["checked"] and o["n"] not in flip) or "nothing else")] + \
                 ([("Then", f"{act['label']} (⏎)")] if advance else [("Then", "stays on the question")]) + \
                 [("By pressing", human_keys(keys))]
+        if menu.get("question"):
+            lines.insert(0, ("Answers", menu["question"]))
     else:
         raise HerdrError("bad_kind", "kind must be text, keys, choose, multi, model or effort")
 
@@ -873,14 +884,14 @@ def build_plan(body):
             del PLANS[k]
         PLANS[plan["nonce"]] = plan
     return {
-        "nonce": plan["nonce"], "kind": kind, "expires_s": NONCE_TTL_S, "approves": approves,
+        "nonce": plan["nonce"], "kind": kind, "expires_s": NONCE_TTL_S, "approves": approves, "from_box": bool(body.get("from_box")),
         "target": {"host": host["id"], "pane": pane,
                    "title": os.path.basename((a.get("cwd") or "").rstrip("/")) or pane, "project": "", "status": status},
         "lines": [{"k": k, "v": v} for k, v in lines],
     }
 
 
-AWAIT_CLEAR_S = float(os.environ.get("SHEPR_AWAIT_CLEAR_S", "5"))   # how long to wait for a question to close after Esc
+AWAIT_CLEAR_S = float(os.environ.get("SHEPR_AWAIT_CLEAR_S", "20"))   # how long to wait for a question to close after Esc. Claude Code takes a few seconds to take the Esc in before its state leaves "blocked": 5 was too short (2026-11-04)
 
 
 def run_step(host, pane, step):
@@ -892,7 +903,8 @@ def run_step(host, pane, step):
             if get_agent(host, pane)["agent_status"] != "blocked":
                 return None
             if time.time() >= end:
-                raise HerdrError("still_blocked", "the question did not close, so your words were not sent")
+                raise HerdrError("still_blocked", f"Esc was pressed, but the session still showed its question after {AWAIT_CLEAR_S:g} seconds, so your words were not sent. "
+                                                  "The question may have closed since: look at the session, then send again")
             time.sleep(0.25)
     if step["op"] == "keys":
         return run_herdr(m, ["pane", "send-keys", pane] + step["keys"], timeout=10, want_json=False)
@@ -906,6 +918,20 @@ def run_step(host, pane, step):
         # No "--" here: `agent prompt` takes the text as a hyphen-tolerant positional and treats "--" as text.
         return run_herdr(m, ["agent", "prompt", pane, step["text"]], timeout=15, want_json=False)
     raise HerdrError("bad_step", step["op"])
+
+
+def _did(step):
+    """What a finished step means to a person reading an error, instead of the name the code gives it."""
+    op = step["op"]
+    if op == "keys":
+        return "pressed " + human_keys(step["keys"])
+    if op == "text":
+        return "typed your words"
+    if op == "prompt":
+        return "sent your words"
+    if op == "await_clear":
+        return "waited for the question to close"
+    return op
 
 
 PANE_LOCKS = {}
@@ -995,7 +1021,7 @@ def _commit_pane_plan(host, plan):
                                              f"Sent before stopping: {', '.join(done) or 'nothing'}. Look at the screen and try again.")
         try:
             run_step(host, plan["pane"], step)
-            done.append(step["op"])
+            done.append(_did(step))
             if step["op"] == "await_clear":
                 # The question can close because a different session now owns the pane. Do not prompt that one.
                 # Still-blocked is already refused inside await_clear; the same session, now idle, is sent.

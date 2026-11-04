@@ -279,7 +279,8 @@ have landed, and the message says so. A dialog with several steps keeps one `sta
 the screen again: keys or words planned for one question are refused if a different question is on screen now, Send now is refused
 once its queue line has gone, and Skip and send is refused if another session took the pane. In each case nothing is sent.
 
-- **Words at a numbered question are never typed into it** (a digit would pick an option). Shepr keeps your message in view and offers **Skip and send**: Esc closes the question without answering it, Shepr waits until it has closed, then sends your message as an ordinary prompt. You review both steps first. If the question will not close, nothing is sent and your words stay in the box.
+- **Words at a numbered question are never typed into it** (a digit would pick an option). Shepr keeps your message in view and offers **Skip and send**: Esc closes the whole question without answering it (in a form with several questions that throws away the answers you already gave, and the confirm sheet says so), Shepr waits up to 20 seconds for it to close, then sends your message as an ordinary prompt. You review both steps first. If the session still shows its question after that, nothing is sent and your words stay in the box.
+- Words you type that go into a question's **Type something** row are used up: the box is cleared once they are sent, and the confirm sheet names the question they answer, so a form's second question never takes words meant for its first without you seeing it.
 - A blocked agent gets keys, not prompts: option buttons (it works out the ↓ presses from the screen), an
   arrow/Enter/Esc pad, or a typed line. Options that read like approvals are marked amber and the confirm sheet says so.
 - An idle agent gets a normal prompt. A working agent only accepts `Esc` (interrupt) or a queued prompt.
@@ -338,7 +339,7 @@ Every setting is an environment variable on the server. Nothing needs setting fo
 | `SHEPR_READONLY` | off | `1` turns every write off. |
 | `SHEPR_USAGE` | on | `0` turns the subscription meter off. |
 | `SHEPR_VAPID_SUB` | this repository's address | The contact the push service sees. |
-| `SHEPR_AWAIT_CLEAR_S` | `5` | How many seconds Skip and send waits for a question to close before it gives up and sends nothing. |
+| `SHEPR_AWAIT_CLEAR_S` | `20` | How many seconds Skip and send waits for a question to close after Esc before it gives up and sends nothing. Claude Code takes a few seconds to take the Esc in. The tests set it to 3. |
 
 The tests also use `SHEPR_LOCAL_ONLY`, `SHEPR_PUSH_ALLOW`, `SHEPR_USAGE_FIXTURE` and `SHEPR_APNS_URL`. They are not for normal use.
 
@@ -404,7 +405,7 @@ eval "$(tests/fake-session.sh env)"
 export SHEPR_LOCAL_ONLY=1 SHEPR_URL=http://localhost:8743 SHEPR_POLL=3   # LOCAL_ONLY: a real machine on your tailnet cannot change a result
 export CLAUDE_HOME=$PWD/tests/fixtures/claude-home CODEX_HOME=$PWD/tests/fixtures/codex-home   # fixture skills and conversations
 export SHEPR_USAGE_FIXTURE=/tmp/claude-1000/shepr-usage.json   # the Subs page reads the fixture tests/ui.mjs writes
-export SHEPR_CLAUDE_CMD='echo STARTED' SHEPR_CODEX_CMD='echo CODEX' SHEPR_NEW_CMD='echo CCC' SHEPR_PROJECTS=/tmp/shepr-projects SHEPR_PUSH_ALLOW=127.0.0.1:9988
+export SHEPR_CLAUDE_CMD='echo STARTED' SHEPR_CODEX_CMD='echo CODEX' SHEPR_NEW_CMD='echo CCC' SHEPR_PROJECTS=/tmp/shepr-projects SHEPR_PUSH_ALLOW=127.0.0.1:9988 SHEPR_AWAIT_CLEAR_S=3
 python3 server.py 8743 &
 node tests/ui.mjs; node tests/small_screen.mjs; node tests/sw_offline.mjs; node tests/push_sw.mjs; node tests/format.mjs; node tests/draft_commit.mjs; python3 tests/pair_cli_test.py
 for t in menu_parse server_hardening history push usage ledger status qr_secret live; do python3 tests/${t}_test.py; done   # pure Python, no server needed

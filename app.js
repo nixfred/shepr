@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v47';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v48';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -1511,8 +1511,9 @@ function commit(plan, goBtn) {
     }
     S.selSig = null; S.freeText = '';   // the next tick-several question starts from what is on screen
     // The answer can arrive after you moved to another session: only clear the draft of the one it was for.
-    if (plan.kind === 'text' && sentTo) drafts.put(sentTo, '');   // sent: nothing left to keep, even if you have moved on since
-    if (S.cur && S.cur.host + '|' + S.cur.pane === sentTo) { S.keybuf = []; paintStage(); if (plan.kind === 'text') { $('msg').value = ''; autosize(); } }   // a tapped option must not wipe the words you have not sent
+    const fromBox = plan.kind === 'text' || plan.from_box === true;   // words typed in the box that went in as an answer are used up too
+    if (fromBox && sentTo) drafts.put(sentTo, '');   // sent: nothing left to keep, even if you have moved on since
+    if (S.cur && S.cur.host + '|' + S.cur.pane === sentTo) { S.keybuf = []; paintStage(); if (fromBox) { $('msg').value = ''; autosize(); } }   // a tapped option must not wipe the words you have not sent
     if (plan.kind === 'text') noteSlashUse(plan.target.host, S.lastText);
     notify('Sent to ' + (plan.target.title || plan.target.pane), false);
     setTimeout(loadTail, 1400);
@@ -1542,9 +1543,9 @@ function openSkipSheet(text) {
   mid.append(el('h3', null, 'A question is waiting'),
              el('div', 'sub', 'Your words cannot be typed into it: a numbered question reads typed characters as keystrokes. Your message stays in the box either way.'));
   const quote = el('div', 'skipmsg selectable'); quote.textContent = text;   // your own words, as text
-  mid.append(quote, el('div', 'sub', 'Or skip the question. Shepr presses Esc to close it without answering anything, then sends your message as a normal prompt. You review it first.'));
+  mid.append(quote, el('div', 'sub', 'Or skip the question. Shepr presses Esc, which closes the whole question without answering anything. If it is one of several questions in a form, every answer you already gave to it is thrown away. Then it sends your message as a normal prompt. You review it first.'));
   const row = el('div', 'btns');
-  row.append(btn('Answer it first', '', closeSheet), btn('Skip and send\u2026', 'go', () => { closeSheet(); prepare({ kind: 'text', text, skip: true }); }));
+  row.append(btn('Answer it first', '', closeSheet), btn('Skip and send\u2026', 'go appr', () => { closeSheet(); prepare({ kind: 'text', text, skip: true }); }));
   box.append(mid, row);
   openSheet(box);
 }
@@ -2019,7 +2020,7 @@ function paintDock() {
   q.hidden = !(S.queued && S.agent && S.agent.agent === 'claude' && S.q && S.q.writes);
   if (!q.hidden) q.append(el('span', 'qtxt', 'A message is queued behind the current work.'), btn('Send now', 'qgo', () => prepare({ kind: 'sendnow' })));
   // Short on purpose: the box is narrow now (the / button), and a placeholder that wraps makes the box grow.
-  const ph = st === 'blocked' ? (m && m.options.length ? (m.options.some((o) => o.free) ? 'Your own answer (goes in the \u270e row)' : 'Tap an option, or write to skip it') : 'Answer, sent with \u23ce')
+  const ph = st === 'blocked' ? (m && m.options.length ? (m.options.some((o) => o.free) ? 'Your own answer (goes in the \u270e row)' : (m.form ? 'Tap an option. Words here cancel the form' : 'Tap an option, or write to skip it')) : 'Answer, sent with \u23ce')
            : st === 'working' ? 'Queue a message'
            : 'Message ' + (S.agent ? S.agent.agent : '');
   $('msg').placeholder = ph;

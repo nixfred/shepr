@@ -1171,13 +1171,38 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     check('typing: what you typed is still in the box and kept as the draft', (await page.inputValue('#msg')) === WORDS && await page.evaluate((w) => Object.values(JSON.parse(localStorage.getItem('shepr.drafts') || '{}')).some((d) => d.t === w), WORDS));
     await page.click('#sheet .btns button:not(.go)'); await page.waitForTimeout(300);
     check('typing: "Answer it first" closes the sheet and keeps the words', (await page.$('.skipsheet')) === null && (await page.inputValue('#msg')) === WORDS);
-    await page.click('#send'); await page.waitForSelector('.skipsheet'); await page.click('#sheet .btns .go');
+    await page.click('#send'); await page.waitForSelector('.skipsheet');
+    check('typing: the skip sheet says Esc can cancel a whole form, and its button is amber like other risky sends', /whole question/.test(await page.textContent('.skipsheet')) && /form/.test(await page.textContent('.skipsheet')) && await page.$eval('#sheet .btns .go', (b) => b.classList.contains('appr')));
+    await page.click('#sheet .btns .go');
     await page.waitForFunction(() => /Closes the question/.test(document.getElementById('sheet').textContent), null, { timeout: 6000 }).catch(() => {});
     const skipPlan = await page.textContent('#sheet');
     check('typing: skipping shows exactly what will happen first (Esc, then your words as a prompt) and approves nothing', /Closes the question/.test(skipPlan) && /Esc\. Nothing is answered or approved/.test(skipPlan) && /Then sends as a prompt/.test(skipPlan) && skipPlan.includes(WORDS) && (await page.$('#sheet .go.appr')) === null);
+    check('typing: the skip confirm sheet carries the warning about forms in a Careful row', /Careful/.test(skipPlan) && /one of several in a form/.test(skipPlan));
     await page.waitForTimeout(900); await page.click('#sheet .btns .go');
-    await page.waitForFunction(() => /did not close/.test(document.body.textContent), null, { timeout: 14000 }).catch(() => {});
-    check('typing: if the question will not close it says so, nothing was sent, and your words are still there', /did not close/.test(await page.textContent('body')) && (await page.inputValue('#msg')) === WORDS);
+    await page.waitForFunction(() => /still showed its question/.test(document.body.textContent), null, { timeout: 14000 }).catch(() => {});
+    check('typing: if the question will not close it says so, nothing was sent, and your words are still there', /still showed its question/.test(await page.textContent('body')) && (await page.inputValue('#msg')) === WORDS);
+    // words typed in the box that went in as an answer are used up, a tapped option leaves the box alone (the server's replies are stubbed here)
+    {
+      const cur = await page.evaluate(() => window.shepr.S.cur);
+      let fromBox = true;
+      const fake = () => ({ nonce: 'stub' + Math.random(), kind: 'choose', expires_s: 60, approves: false, from_box: fromBox,
+        target: { host: cur.host, pane: cur.pane, title: 'burnbar', project: '', status: 'blocked' },
+        lines: [{ k: 'Answers', v: 'Which one?' }, { k: 'Picks', v: '3. Type something' }, { k: 'Types', v: 'my answer' }] });
+      await page.route('**/api/send/prepare', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(fake()) }));
+      await page.route('**/api/send/commit', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) }));
+      await page.fill('#msg', 'my answer'); await page.click('#send'); await page.waitForSelector('#sheet:not([hidden]) .kv');
+      check('answer: the confirm sheet names the question the words answer', /Answers/.test(await page.textContent('#sheet .kv')) && /Which one\?/.test(await page.textContent('#sheet .kv')));
+      await page.waitForTimeout(800); await page.click('#sheet .btns .go');
+      await page.waitForFunction(() => document.getElementById('sheet').hidden, null, { timeout: 5000 });
+      check('answer: words from the box that went in as an answer are used up, so the box is empty and the draft is gone', (await page.inputValue('#msg')) === '' && await page.evaluate(() => !Object.values(JSON.parse(localStorage.getItem('shepr.drafts') || '{}')).some((d) => d.t === 'my answer')));
+      fromBox = false;
+      await page.fill('#msg', 'still mine'); await page.click('#send'); await page.waitForSelector('#sheet:not([hidden]) .kv');
+      await page.waitForTimeout(800); await page.click('#sheet .btns .go');
+      await page.waitForFunction(() => document.getElementById('sheet').hidden, null, { timeout: 5000 });
+      check('answer: a tapped option leaves the words you have not sent in the box', (await page.inputValue('#msg')) === 'still mine');
+      await page.unroute('**/api/send/prepare'); await page.unroute('**/api/send/commit');
+      await page.fill('#msg', '');
+    }
     await page.fill('#msg', Array.from({ length: 12 }, (_, i) => 'line ' + (i + 1) + ' of my message').join('\n')); await page.waitForTimeout(250);
     const mb = await page.$eval('#msg', (t) => { const cs = getComputedStyle(t), lh = parseFloat(cs.lineHeight), pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom); return { atEnd: t.scrollTop + t.clientHeight >= t.scrollHeight - 1, lines: (t.clientHeight - pad) / lh, scrolls: t.scrollHeight > t.clientHeight }; });
     check('typing: a long message keeps the line you are typing in full view, in a box of whole lines (no half-cut line at the bottom, five lines at most)', mb.atEnd && mb.scrolls && Math.abs(mb.lines - Math.round(mb.lines)) < 0.06 && mb.lines <= 5.06);

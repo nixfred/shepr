@@ -100,4 +100,12 @@ mf = srv.parse_menu(FREE)
 check("a 'Type something.' row is recognised as a text row, and no other row is", [o["free"] for o in mf["options"]] == [False, False, True, False] and mf["question"] == "Pick one")
 check("question: no menu means no question", srv.parse_menu("just some prose\nno options here") is None)
 
+
+# A form with several questions draws a tab bar above each step, and Esc on any step cancels the WHOLE form (Shepr's Skip and send warns about it).
+check("form: a step of a multi-question form is recognised by its tab bar", srv.parse_menu(WIZARD_ON_NEXT)["form"] is True)
+check("form: the form's review step is recognised too", srv.parse_menu(REVIEW)["form"] is True)
+check("form: a plain permission dialog is not a form", srv.parse_menu(SINGLE)["form"] is False)
+check("form: a single multi-select question with no tab bar is not a form", srv.parse_menu(MULTI_ON_OPTION)["form"] is False)
+check("form: a single question with a typing row is not a form", srv.parse_menu(FREE)["form"] is False)
+
 sys.exit(0 if ok else 1)

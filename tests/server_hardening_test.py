@@ -4,6 +4,7 @@ import hashlib, importlib.util, json, os, shutil, subprocess, sys, tempfile, thr
 here = os.path.dirname(os.path.abspath(__file__))
 os.environ["SHEPR_STATE"] = tempfile.mkdtemp()
 for _k in ("SHEPR_NEW_CMD", "SHEPR_CLAUDE_CMD", "SHEPR_CODEX_CMD", "SHEPR_PROJECTS", "SHEPR_PUSH_ALLOW", "SHEPR_READONLY"): os.environ.pop(_k, None)   # a test pins its own settings, not the shell's
+os.environ.pop("SHEPR_AWAIT_CLEAR_S", None)   # the default wait is one of the things tested
 os.environ["SHEPR_POLL"] = "15"
 spec = importlib.util.spec_from_file_location("shepr_server", os.path.join(here, "..", "server.py"))
 srv = importlib.util.module_from_spec(spec); spec.loader.exec_module(srv)
@@ -201,6 +202,10 @@ st = srv.PLANS[p["nonce"]]["steps"]
 check("type-something: the plan is arrow down twice, type the words, then Enter, and says so",
       [s["op"] for s in st] == ["keys", "text", "keys"] and st[0]["keys"] == ["down", "down"] and st[1]["text"].startswith("What about 42") and st[2]["keys"] == ["enter"]
       and any(l["k"] == "Types" for l in p["lines"]) and srv.PLANS[p["nonce"]]["snap"]["text_at"] == 2)
+check("type-something: the sheet names the question the words answer, and a pick made with the pencil is not marked as words from the box",
+      any(l["k"] == "Answers" and l["v"] == "Pick one" for l in p["lines"]) and p["from_box"] is False)
+pt = srv.build_plan({"host": "gus", "pane": "w1:p1", "kind": "text", "text": "words from the box"})
+check("words typed in the box at a question with a typing row go in as that answer, and the plan says so, so the phone clears the box", pt["kind"] == "choose" and pt["from_box"] is True)
 # commit: the screen is read before the words go in
 seq = {"screens": []}
 sent = []
@@ -438,10 +443,26 @@ sk = srv.PLANS[ps["nonce"]]["steps"]
 check("skip: the plan is Esc, wait for the question to close, then the words as a prompt (several lines are fine), and approves nothing",
       [s["op"] for s in sk] == ["keys", "await_clear", "prompt"] and sk[0]["keys"] == ["esc"] and sk[2]["text"] == "line one\nline two"
       and ps["approves"] is False and any(l["k"] == "Closes the question" and "Nothing is answered or approved" in l["v"] for l in ps["lines"]))
+check("skip: the plan carries a Careful line about forms", any(l["k"] == "Careful" and "one of several in a form" in l["v"] for l in ps["lines"]))
+FORMQ = """←  ☒ Menu items  ☐ Live test  ✔ Submit  →
+
+May I do one live round trip?
+
+❯ 1. Yes, on a spam thread
+  2. No live test
+  3. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel"""
+srv.read_tail = lambda host, pane, lines, max_bytes=None: FORMQ
+pf = srv.build_plan({"host": "gus", "pane": "w1:p1", "kind": "text", "text": "words", "skip": True})
+check("skip: on a step of a multi-question form the Careful line says Esc cancels the WHOLE form", any(l["k"] == "Careful" and "WHOLE form" in l["v"] for l in pf["lines"]))
+check("menu: a step of a multi-question form is recognised by its tab bar, a plain question is not", srv.parse_menu(FORMQ)["form"] is True and srv.parse_menu(NUMQ)["form"] is False)
+srv.read_tail = lambda host, pane, lines, max_bytes=None: NUMQ
 state["status"] = "working"
 pw = srv.build_plan({"host": "gus", "pane": "w1:p1", "kind": "text", "text": "hello", "skip": True})
 check("skip: on an agent that is not blocked the flag does nothing, so Esc can never interrupt its work", [s["op"] for s in srv.PLANS[pw["nonce"]]["steps"]] == ["prompt"])
 state["status"] = "blocked"
+check("skip: the wait for a closing question is 20 seconds by default (Claude took longer than 5 to take an Esc in)", srv.AWAIT_CLEAR_S == 20)
 srv.AWAIT_CLEAR_S = 0.8
 flip = {"n": 0}
 def closing(host, pane):
@@ -453,6 +474,9 @@ srv.get_agent = lambda host, pane: {"agent_status": "blocked"}
 try: REAL_RUN_STEP({"machine": None}, "w1:p1", {"op": "await_clear"}); stuck = None
 except srv.HerdrError as e: stuck = e.code
 check("skip: if the question never closes it says so", stuck == "still_blocked")
+try: REAL_RUN_STEP({"machine": None}, "w1:p1", {"op": "await_clear"}); stuck_msg = ""
+except srv.HerdrError as e: stuck_msg = e.message
+check("skip: that message says Esc WAS pressed and the words were NOT sent, and no longer claims the question did not close", "Esc was pressed" in stuck_msg and "not sent" in stuck_msg and "did not close" not in stuck_msg)
 srv.get_agent = STUB
 order, never_closes = [], [False]
 def rec(host, pane, step):
@@ -464,11 +488,13 @@ def commit_skip():
     order.clear(); pl = srv.build_plan({"host": "gus", "pane": "w1:p1", "kind": "text", "text": "mine", "skip": True})
     srv.PLANS[pl["nonce"]]["made"] = time.time(); srv.LAST_SENT.clear()
     try: srv.commit_plan(pl["nonce"]); return None
-    except srv.HerdrError as e: return e.code
+    except srv.HerdrError as e: SKIP_MSGS.append(e.message); return e.code
+SKIP_MSGS = []
 err_ok = commit_skip(); order_ok = list(order)
 never_closes[0] = True; err_stuck = commit_skip(); order_stuck = list(order)
 check("skip: committed in order, Esc then the wait then the words", err_ok is None and order_ok == ["keys", "await_clear", "prompt"])
 check("skip: when the question will not close, the words are never sent", err_stuck == "still_blocked" and order_stuck == ["keys", "await_clear"])
+check("skip: the failure says what WAS done (Esc pressed), not just 'keys'", "Sent before the failure: pressed Esc" in SKIP_MSGS[-1])
 
 # ---- an EXISTING folder opened as a herdr project: listed, planned and committed without creating or changing anything in it
 import tempfile, shutil
