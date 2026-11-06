@@ -161,7 +161,14 @@ def run_herdr(machine, args, timeout=10, want_json=True):
         raise HerdrError("bad_json", "herdr returned something that is not JSON")
 
 
+_tls = threading.local()   # per thread: did THIS thread's last discover_hosts() really read herdr's saved-machine list?
+
+
 def discover_hosts():
+    """Every saved herdr machine plus this host. Sets _tls.listed: True only when the saved-machine list was really read.
+    A failed or skipped read leaves just this host in the answer, and that must never be taken for "every other machine
+    was removed". It is per thread, so another thread's good read can never vouch for this thread's failed one."""
+    _tls.listed = False
     hosts = [{"id": LOCAL, "machine": None, "kind": "local", "enabled": True}]
     if os.environ.get("SHEPR_LOCAL_ONLY"):   # tests: never read real remote machines, so a machine being up or down cannot change a result
         return hosts
@@ -171,8 +178,41 @@ def discover_hosts():
             if label and label != LOCAL:
                 hosts.append({"id": label, "machine": label, "kind": "remote", "enabled": bool(m.get("enabled"))})
     except HerdrError:
-        pass
+        return hosts
+    _tls.listed = True
     return hosts
+
+
+GONE_POLLS = 2   # saved-machine lists in a row, each really read, that must lack a machine before its ledger is dropped
+_absent = {}     # host id -> how many such lists in a row have lacked it
+
+
+def forget_gone_hosts(hosts, listed):
+    """A saved machine can go away for good (a throwaway container, a cloud box that was deleted). Its ledger rows would
+    stay in seen.json for ever, and if the name is used again (a container id that is recycled gives the same label) the new
+    machine would inherit the old one's "blocked for" times. So once `GONE_POLLS` real lists in a row have lacked a host,
+    its host entry and every ledger row of it are dropped. A list that could not be read changes nothing."""
+    if not listed:
+        return
+    ids = {h["id"] for h in hosts}
+    changed = False
+    with LOCK:
+        for hid in [k for k in _absent if k in ids]:
+            del _absent[hid]
+        for hid in [k for k in STATE["hosts"] if k not in ids]:
+            _absent[hid] = _absent.get(hid, 0) + 1
+            if _absent[hid] < GONE_POLLS:
+                continue
+            del _absent[hid]
+            del STATE["hosts"][hid]
+            for k in [k for k in STATE["seen"] if k.startswith(hid + "|")]:
+                del STATE["seen"][k]
+            changed = True
+        if changed:
+            try:
+                save_state(STATE)
+            except OSError as e:
+                print(f"shepr: could not save the ledger: {e!r}", file=sys.stderr, flush=True)
 
 
 def clean_text(s):
@@ -474,7 +514,9 @@ def poll_all(wait=2.0):
     """Start a poll of every enabled host and wait up to `wait` seconds for the quick ones. A host that is down (an ssh that
     takes 9 s to time out) keeps polling in the background and publishes when it answers: it can no longer make every refresh
     wait for it, or keep the live hosts' data minutes stale."""
+    _tls.listed = False   # a replaced discover_hosts (tests) never sets it, so it can never count as a real list
     hosts = discover_hosts()
+    forget_gone_hosts(hosts, getattr(_tls, "listed", False))
     with LOCK:
         HOST_ORDER[:] = [h["id"] for h in hosts]
         for hid in [k for k in HOST_SNAP if k not in HOST_ORDER]:
