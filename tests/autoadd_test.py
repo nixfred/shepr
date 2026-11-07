@@ -77,11 +77,13 @@ srv.AUTOADD = False
 srv.SCAN_MEMO.clear(); srv.SCAN.update(at=0, running=True, peers=[])
 srv.scan_tailnet(force=True)
 check("a scan from the Hosts tab asks every node", sorted(probed) == sorted(answers) and not srv.SCAN["running"])
+check("the scan remembers how many nodes it actually asked", srv.SCAN["probed"] == len(answers))
 check("each peer carries its state and whether a server is running", {p["name"]: (p["state"], p["running"]) for p in srv.SCAN["peers"]}["good"] == ("ready", True)
       and {p["name"]: p["running"] for p in srv.SCAN["peers"]}["idle"] is False)
 probed.clear(); srv.SCAN["running"] = True
 srv.scan_tailnet(force=False)
 check("a background scan right after does not log in again to no-herdr, needs-key or first-connect nodes", sorted(probed) == ["good", "idle", "off"])
+check("...and says it asked only the three it had to", srv.SCAN["probed"] == 3)
 check("...yet still reports their last answer", {p["name"]: p["state"] for p in srv.SCAN["peers"]}["nohe"] == "noherdr")
 probed.clear(); srv.SCAN["running"] = True
 t_old = time.time() - 7200

@@ -1507,7 +1507,7 @@ def scan_tailnet(force=True):
         for p in peers:
             _t, p["state"], p["detail"], p["running"] = answers[p["name"]]
         with LOCK:
-            SCAN.update(at=now, peers=peers)
+            SCAN.update(at=now, peers=peers, probed=len(todo))
         if AUTOADD:
             auto_add(peers)
     except Exception as e:
@@ -1560,6 +1560,9 @@ def autoscan_loop():
                     SCAN["running"] = True
             if go:
                 scan_tailnet(force=False)   # clears SCAN["running"] itself
+                with LOCK:
+                    n, asked, up = len(SCAN["peers"]), SCAN.get("probed", 0), sum(1 for p in SCAN["peers"] if p.get("running") is True)
+                print(f"shepr: tailnet scan: {n} unsaved nodes online, {asked} asked, {up} running herdr", file=sys.stderr, flush=True)
         except Exception as e:
             print(f"shepr: automatic scan failed: {e!r}", file=sys.stderr)
         time.sleep(SCAN_EVERY_S)
