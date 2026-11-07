@@ -18,6 +18,10 @@ read its CLAUDE.md first). The directory name is Fred's session name; the produc
 8. Bump `VERSION` in `sw.js` whenever the shell changes, or phones keep the old one.
 9. The subscription meter (`usage.py`) stands alone. It reads only Claude Code's own login, Codex's and Grok's own files and the user's Kimi key, and a token goes only to the provider it belongs to (Anthropic's usage endpoint: a read-only GET, never refreshed, never logged, never returned). It never reads another app's files (Burn Bar, Omarchy). `SHEPR_USAGE=0` turns it off.
 10. The Lock Screen card (`ios/`, native, optional) is read-only and shows names only: rules 2 and 4 apply. Every push to Apple is sealed (ChaCha20-Poly1305); never put a name, path or conversation title in a push's plain fields, and never add a button or App Intent to the card that answers an agent.
+11. **Automatic host adding is the one write that skips the confirm sheet (Fred, 2026-11-06).** `SHEPR_AUTOADD=1` only: the
+    background scan saves a tailnet node with `herdr machine add` when it is Fred's own, its key and host key already work, and its
+    default herdr server is running. Cap 5 a scan, audited as `host_add_auto`, 1 h back-off after a failure, never on `SHEPR_READONLY`.
+    It adds read access to a host and nothing else: rules 2 and 3 still hold for every send, and it never removes a machine.
 
 ## Where things live
 

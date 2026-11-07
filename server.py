@@ -1395,6 +1395,14 @@ def public_url(port):
 HOST_KINDS = {"host_enable", "host_disable", "host_add", "device_revoke"}
 SCAN = {"at": 0.0, "running": False, "peers": []}
 LABEL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,23}$")
+# Automatic adding (opt in): a background scan of YOUR tailnet nodes that adds the ones running a herdr server. Never on a read-only server.
+AUTOADD = os.environ.get("SHEPR_AUTOADD") == "1" and not READONLY
+SCAN_EVERY_S = max(60.0, float(os.environ.get("SHEPR_SCAN_S", "300")))
+AUTOADD_MAX = 5                                              # machines one scan may add, so a surprise cannot add a whole tailnet
+AUTOADD_RETRY_S = 3600                                       # a failed add is not tried again for this long
+RECHECK_S = {"noherdr": 3600, "nokey": 3600, "hostkey": 3600}  # a background scan does not log in again to a node that answered this
+SCAN_MEMO = {}                                               # peer name -> (time, state, detail, running)
+AUTO_FAILED = {}                                             # peer name -> time of its last failed automatic add
 
 
 def machine_profiles():
@@ -1414,34 +1422,51 @@ def hub_pubkey():
     return None
 
 
+# Runs on the remote machine under sh, so the user's own shell (fish, zsh, bash) never has to parse it. It finds herdr on the plain PATH or in
+# the login shell (macOS and most installers put herdr's directory in a login profile), prints that path, then asks herdr which sessions are
+# running. `session list` only reads: it starts nothing. An older herdr without it prints no JSON, and the answer is then "unknown".
+REMOTE_PROBE = ("sh -c 'P=$( { command -v herdr || \"$SHELL\" -lc \"command -v herdr\"; } 2>/dev/null | grep \"^/\" | tail -n 1 ); "
+                "[ -n \"$P\" ] || exit 1; echo \"$P\"; \"$P\" session list --json 2>/dev/null; exit 0'")
+
+
 def ssh_probe(target):
-    """Can THIS host ssh to target with its key, and is herdr there? Never prompts, never trusts a
-    new host key on its own (a first connect is a decision a person makes at a terminal)."""
+    """(state, detail, running). Can THIS host ssh to target with its key, and is herdr there? `running` is True when its default
+    session has a server up, False when it has not, None when that could not be told. Never prompts, never trusts a new host key
+    on its own (a first connect is a decision a person makes at a terminal)."""
     try:
         p = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", "-o", "StrictHostKeyChecking=yes",
-                            "-o", "ControlMaster=no", "-o", "ControlPath=none", target,
-                            # Plain PATH first; then the user's login shell, because macOS and most
-                            # installers put herdr's directory in a login profile, not the ssh default.
-                            'command -v herdr || "$SHELL" -lc "command -v herdr"'],
+                            "-o", "ControlMaster=no", "-o", "ControlPath=none", target, REMOTE_PROBE],
                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=14)
     except subprocess.TimeoutExpired:
-        return "down", "timed out"
+        return "down", "timed out", None
     # ssh prints advisory banners ("** The server may need to be upgraded", warnings) on stderr; they are
     # not the failure, so keep only the lines that are.
     err_lines = [l.strip() for l in (p.stderr or "").splitlines()
                  if l.strip() and not l.lstrip().startswith(("**", "#", "Warning:", "WARNING"))]
     err = "\n".join(err_lines)
     low = err.lower()
-    found = [l.strip() for l in (p.stdout or "").splitlines() if l.strip().startswith("/")]
+    out_lines = [l.strip() for l in (p.stdout or "").splitlines() if l.strip()]
+    found = [l for l in out_lines if l.startswith("/")]
     if p.returncode == 0 and found:
-        return "ready", found[-1]
+        running = None
+        for l in out_lines:
+            if l.startswith("{"):
+                try:
+                    sessions = json.loads(l)["sessions"]
+                    if not isinstance(sessions, list):
+                        raise TypeError("sessions is not a list")
+                    running = any(isinstance(x, dict) and x.get("name") == "default" and x.get("running") is True for x in sessions)
+                except (ValueError, KeyError, TypeError):
+                    running = None
+                break
+        return "ready", found[-1], running
     if p.returncode in (0, 1) and not err:
-        return "noherdr", "herdr not found on PATH or in the login shell"
+        return "noherdr", "herdr not found on PATH or in the login shell", None
     if "permission denied" in low:
-        return "nokey", "this host's key is not authorized there"
+        return "nokey", "this host's key is not authorized there", None
     if "host key verification failed" in low or "no matching host key" in low or "remote host identification" in low:
-        return "hostkey", "first connect needed: run `ssh " + target + "` once and check the fingerprint"
-    return "down", (err_lines or ["unreachable"])[-1][:120]
+        return "hostkey", "first connect needed: run `ssh " + target + "` once and check the fingerprint", None
+    return "down", (err_lines or ["unreachable"])[-1][:120], None
 
 
 def tailnet_peers():
@@ -1462,20 +1487,82 @@ def tailnet_peers():
     return sorted(out, key=lambda x: x["name"])
 
 
-def scan_tailnet():
+def scan_tailnet(force=True):
+    """Probe the online nodes that belong to you. `force` (the Hosts tab's Scan button) asks every one afresh; a background scan
+    reuses a recent "no herdr / needs key / first connect" so it does not log in to the same node every few minutes for nothing."""
     try:
         peers = tailnet_peers()
+        now = time.time()
+        todo, answers = [], {}
+        for p in peers:
+            m = SCAN_MEMO.get(p["name"])
+            if not force and m and now - m[0] < RECHECK_S.get(m[1], 0):
+                answers[p["name"]] = m
+            else:
+                todo.append(p)
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
-            results = list(ex.map(lambda p: ssh_probe(p["target"]), peers))
-        for p, (state, detail) in zip(peers, results):
-            p["state"], p["detail"] = state, detail
+            results = list(ex.map(lambda p: ssh_probe(p["target"]), todo))
+        for p, (state, detail, running) in zip(todo, results):
+            SCAN_MEMO[p["name"]] = answers[p["name"]] = (now, state, detail, running)
+        for p in peers:
+            _t, p["state"], p["detail"], p["running"] = answers[p["name"]]
         with LOCK:
-            SCAN.update(at=time.time(), peers=peers)
+            SCAN.update(at=now, peers=peers)
+        if AUTOADD:
+            auto_add(peers)
     except Exception as e:
         print(f"shepr: tailnet scan failed: {e!r}", file=sys.stderr)
     finally:
         with LOCK:
             SCAN["running"] = False
+
+
+def auto_add(peers):
+    """Save, without asking, the scanned nodes that are running a herdr server (SHEPR_AUTOADD=1). The same `herdr machine add` the
+    Add button runs, so herdr checks the install and installs nothing. Only a node that is yours (tailnet_peers), whose key already
+    works and whose host key is already known (ssh_probe), and whose DEFAULT session has a server up: a node that merely has
+    herdr installed is left for the Add button, because adding starts a server there. Every add, and every failure, is audited."""
+    if READONLY:
+        return
+    added = 0
+    for p in peers:
+        label = p["name"]
+        if added >= AUTOADD_MAX:
+            break
+        if p.get("state") != "ready" or p.get("running") is not True:
+            continue
+        if not (LABEL_RE.match(label) and LABEL_RE.match(p["target"])):   # a name ssh could read as an option, or herdr would refuse
+            continue
+        if time.time() - AUTO_FAILED.get(label, 0) < AUTOADD_RETRY_S:
+            continue
+        step = {"op": "machine", "args": ["add", p["target"], "--label", label]}
+        plan = {"kind": "host_add_auto", "host": LOCAL, "pane": "", "steps": [step]}
+        try:
+            run_herdr(None, ["machine"] + step["args"], timeout=60, want_json=False)
+        except HerdrError as e:
+            AUTO_FAILED[label] = time.time()
+            audit(plan, False, f"{e.code}: {e.message}")
+            continue
+        audit(plan, True, "")
+        added += 1
+    if added:
+        poll_all()
+
+
+def autoscan_loop():
+    """Scan on a slow clock for as long as the server runs. A scan the Hosts tab started is left to finish, not run twice."""
+    time.sleep(20)   # the first poll and the tailnet identity settle first
+    while True:
+        try:
+            with LOCK:
+                go = not SCAN["running"]
+                if go:
+                    SCAN["running"] = True
+            if go:
+                scan_tailnet(force=False)   # clears SCAN["running"] itself
+        except Exception as e:
+            print(f"shepr: automatic scan failed: {e!r}", file=sys.stderr)
+        time.sleep(SCAN_EVERY_S)
 
 
 def start_scan():
@@ -3288,13 +3375,16 @@ def main():
     load_push()
     prune_waits()
     threading.Thread(target=poller, daemon=True).start()
+    if AUTOADD and not os.environ.get("SHEPR_LOCAL_ONLY"):
+        threading.Thread(target=autoscan_loop, daemon=True).start()
     threading.Thread(target=LIVE.run, daemon=True).start()   # sends Lock Screen card updates; idle until a phone registers
     if not USAGE_FIXTURE:
         threading.Thread(target=METER.loop, daemon=True).start()   # the subscription meter, on its own slow clock
     handler = functools.partial(Handler, directory=HERE)
     srv = CappedServer((a.bind, a.port), handler)
     print(f"shepr: serving {HERE} on http://{a.bind}:{a.port} as {LOCAL} "
-          f"(owner={OWNER['login']}, devices={len(DEVICES)}, writes={'off' if READONLY else 'on, confirm-first'})",
+          f"(owner={OWNER['login']}, devices={len(DEVICES)}, writes={'off' if READONLY else 'on, confirm-first'}"
+          f"{', tailnet auto-add every ' + format(SCAN_EVERY_S, 'g') + ' s' if AUTOADD else ''})",
           file=sys.stderr, flush=True)
     try:
         srv.serve_forever()

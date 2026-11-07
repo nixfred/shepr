@@ -321,6 +321,15 @@ you** (nodes shared in from another user are never touched), and reports each as
 `no herdr` (checked on the plain PATH and in the login shell), or `unreachable`. Add and on/off go through the same
 preview-and-confirm sheet and run `herdr machine add|enable|disable`.
 
+**Automatic adding** is off until you set `SHEPR_AUTOADD=1`. Then the server runs that same scan by itself every five minutes
+and saves, without a tap, each node that is running a herdr server, so a new machine shows up in Shepr within minutes of you
+starting herdr on it. It is deliberately narrow. It only ever touches your own online Linux and macOS nodes. It only adds a node
+whose key already works, whose host key it already knows, and whose **default** session has a server **running** (herdr is
+asked with `herdr session list`, which reads and starts nothing). A node that only has herdr installed stays in the scan for the
+Add button, because adding starts a server there. It adds at most five a scan, writes each add or failure to the audit log
+(`sends.jsonl`, kind `host_add_auto`), and does not retry a failed add for an hour. To stay quiet, a background scan does not log
+in again for an hour to a node that answered `no herdr`, `needs key` or `first connect`; the **Scan tailnet** button always asks
+everyone. It never removes a machine, and a read-only server never adds one.
 ## Configuration
 
 Every setting is an environment variable on the server. Nothing needs setting for a normal install.
@@ -336,6 +345,8 @@ Every setting is an environment variable on the server. Nothing needs setting fo
 | `SHEPR_ALLOW_HOSTS` | none | Extra DNS names (comma separated) accepted in the Host header, for a name you put in front of `tailscale serve`. |
 | `SHEPR_URL` | the tailnet name of this machine | The address `shepr pair` prints and puts in the QR. |
 | `SHEPR_POLL` | `15` | Seconds between refreshes of herdr's state. |
+| `SHEPR_AUTOADD` | off | `1` scans your tailnet in the background and saves the nodes that are running herdr (see More hosts). Ignored when `SHEPR_READONLY=1`. |
+| `SHEPR_SCAN_S` | `300` | Seconds between those background scans (60 at least). |
 | `SHEPR_READONLY` | off | `1` turns every write off. |
 | `SHEPR_USAGE` | on | `0` turns the subscription meter off. |
 | `SHEPR_VAPID_SUB` | this repository's address | The contact the push service sees. |
@@ -362,8 +373,8 @@ The tests also use `SHEPR_LOCAL_ONLY`, `SHEPR_PUSH_ALLOW`, `SHEPR_USAGE_FIXTURE`
   machine can reach that port directly and is not asked for the Tailscale identity header (which it could forge
   anyway). It still cannot read or send anything: every `/api` call except `hello` and `pair` needs a signature from
   a paired phone, and pairing needs a one-time code from `shepr pair`.
-- Shepr polls every machine that is enabled in your herdr config. Machines you add from the Hosts tab are limited to
-  your own tailnet nodes, but one you added to herdr by hand is yours to vouch for.
+- Shepr polls every machine that is enabled in your herdr config. Machines you add from the Hosts tab, or that
+  `SHEPR_AUTOADD` adds, are limited to your own tailnet nodes, but one you added to herdr by hand is yours to vouch for.
 - The Lock Screen card is a separate native app (`ios/`). Apple ends a card after 8 hours (it leaves the Lock Screen at most 4 hours
   later), allows 160 points of height and 4 KB per update, and budgets pushes per hour, so the host spends the immediate kind only
   when an agent starts or stops waiting on you. A free Apple ID cannot receive pushes: there the card refreshes only while Shepr
