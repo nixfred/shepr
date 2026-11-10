@@ -11,8 +11,14 @@ os.environ.pop("SHEPR_URL", None)
 spec = importlib.util.spec_from_file_location("shepr_server", SERVER); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 m.learn_tailnet()
 url = m.public_url(8742)
-good = url.startswith("https://") and "127.0.0.1" not in url and ".ts.net:8742" in url
-print(("PASS" if good else "FAIL"), "pairing URL uses the tailnet name:", url)
+import shutil
+if shutil.which("tailscale") is None:
+    # A container or CI image has no tailnet, so the URL can only fall back to 127.0.0.1: nothing to check here. Skip, as with the test server below.
+    good = True
+    print("SKIP pairing URL uses the tailnet name: no tailscale binary on this machine (run this file on a tailnet host):", url)
+else:
+    good = url.startswith("https://") and "127.0.0.1" not in url and ".ts.net:8742" in url
+    print(("PASS" if good else "FAIL"), "pairing URL uses the tailnet name:", url)
 
 # The hint names the user unit that runs THIS server.py. It must not invent shepr, or one nixweb session name.
 def pair_err(home):
