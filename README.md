@@ -57,6 +57,8 @@ shepr pair                                                           # shows a Q
 
 **Installed before 2026-10-14?** Run `shepr fix-boot` once. The old unit could start before Tailscale was connected at boot, fail on `tailscale serve`, and stay down after systemd's five quick retries, so the phone found nothing until someone started it by hand. `fix-boot` adds a drop-in that waits for Tailscale and keeps retrying; `shepr status` warns while a unit still lacks it.
 
+**Tailscale has to be connected.** Shepr only answers over your tailnet, so the unit waits up to two minutes for Tailscale at start and fails when it is off or logged out (`enable --now` then reports `control process exited with error code`, and the unit keeps retrying). When the server is down, `shepr pair` and `shepr status` check Tailscale and say so, for example *Tailscale is turned off on this machine* with the fix (`tailscale up`), instead of only telling you to start a unit that cannot start. Connect Tailscale, then `systemctl --user start shepr`.
+
 The link goes in `~/.local/bin` or `~/bin`, whichever comes first on `PATH`. If neither does, this paste uses `~/.local/bin` and adds it for this shell. The unit written here is named `shepr`. A nixweb install keeps the unit name it already chose.
 
 On the iPhone, in **Safari**: open `https://<this-host>.<your-tailnet>.ts.net:8742`, Share, **Add to Home Screen**. Open
@@ -97,7 +99,9 @@ To remove it, run `omarchy plugin remove nixfred.shepr`. That deletes the plugin
 | **Hosts** | Hosts herdr can reach (turn saved ones on or off) and a tailnet scan for more. |
 | **Settings** | Four sections that each fit one screen. **Display**: text size, splash screen (Full, Short or Off), animations, which tab to open on, how often to refresh, slash commands, top spacing. **Alerts**: notifications. **Phones**: this phone's key, the phones the host trusts (revoke), pair another, forget this one. **About**: the build, gestures, reload, clear unsent drafts. Two links sit at the very bottom: nixfred.com and this repository. |
 
-The Queue and Radar show **every host at once**; each session carries a coloured pill naming its machine (`GUS`, `VIC`), and the chips on top (`All hosts`, `gus 3`, `vic 1`) are only a filter if you tap one. `SHEPR_LOCAL_ONLY=1` makes the server ignore remote machines (the tests use it).
+The Queue and Radar show **every host at once**; each session carries a coloured pill naming its machine (`GUS`, `VIC`), and the chips on top (`All hosts`, `gus 3`, `vic 1`) are only a filter if you tap one. `SHEPR_LOCAL_ONLY=1` makes the server ignore remote machines and other sessions (the tests use it).
+
+**Named herdr sessions count too.** Besides herdr's default session, every *running* named session on the same machine (`herdr --session work`) is a host of its own, called `gus/work`, so its agents reach the queue, the badge and the push notifications and you can answer them like any other. It is the same machine, so Shepr treats it as local, not as a remote host. A session that is not running is not shown. `SHEPR_SESSIONS` limits it (below). Sessions on *other* machines are still the machine's default session only.
 
 Every session is called by its **project** (the directory it runs in), with herdr's session title, the last thing it
 worked on, underneath. Two sessions in one project get their pane id so you can tell them apart.
@@ -345,6 +349,7 @@ Every setting is an environment variable on the server. Nothing needs setting fo
 | `SHEPR_ALLOW_HOSTS` | none | Extra DNS names (comma separated) accepted in the Host header, for a name you put in front of `tailscale serve`. |
 | `SHEPR_URL` | the tailnet name of this machine | The address `shepr pair` prints and puts in the QR. |
 | `SHEPR_POLL` | `15` | Seconds between refreshes of herdr's state. |
+| `SHEPR_SESSIONS` | all | Which running named herdr sessions on this machine to include: unset or `all` is every one, a comma list (`work,review`) only those, `default` none (just the plain session). The session your `HERDR_SOCKET_PATH` already points at is never listed twice. |
 | `SHEPR_AUTOADD` | off | `1` scans your tailnet in the background and saves the nodes that are running herdr (see More hosts). Ignored when `SHEPR_READONLY=1`. |
 | `SHEPR_SCAN_S` | `300` | Seconds between those background scans (60 at least). |
 | `SHEPR_READONLY` | off | `1` turns every write off. |
@@ -419,7 +424,7 @@ export SHEPR_USAGE_FIXTURE=/tmp/claude-1000/shepr-usage.json   # the Subs page r
 export SHEPR_CLAUDE_CMD='echo STARTED' SHEPR_CODEX_CMD='echo CODEX' SHEPR_NEW_CMD='echo CCC' SHEPR_PROJECTS=/tmp/shepr-projects SHEPR_PUSH_ALLOW=127.0.0.1:9988 SHEPR_AWAIT_CLEAR_S=3
 python3 server.py 8743 &
 node tests/ui.mjs; node tests/small_screen.mjs; node tests/sw_offline.mjs; node tests/push_sw.mjs; node tests/format.mjs; node tests/draft_commit.mjs; python3 tests/pair_cli_test.py
-for t in menu_parse server_hardening history push usage ledger status qr_secret live; do python3 tests/${t}_test.py; done   # pure Python, no server needed
+for t in menu_parse server_hardening history push usage ledger status qr_secret live autoadd network_gate plan_host open_folder sessions tailscale_off; do python3 tests/${t}_test.py; done   # pure Python, no server needed
 node tests/shots.mjs                           # regenerates docs/img/screens.png from the RUNNING app
 (cd ios && swift test && swift run shepr-live-render /tmp/shepr-render)   # macOS with Xcode: the Lock Screen card, and a 160 pt height check
 tests/fake-session.sh down

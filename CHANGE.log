@@ -1,6 +1,21 @@
 Shepr change log. Newest first.
 Every outside contribution is listed with the contributor's GitHub profile and, when one could be verified, their X profile.
 
+2026-11-14  server only  Bendangelo  https://github.com/bendangelo
+  X: https://x.com/bendangelo (linked from their own site bendangelo.me and the name matches, checked 2026-11-14)
+  #5  With Tailscale turned off the unit cannot start (`tailscale serve` fails), and `shepr pair` answered "the server is not running,
+      start it", which only starts the same wait again. When the server is down, `shepr pair` and `shepr status` now check Tailscale and
+      say why ("Tailscale is turned off on this machine", "logged out", "tailscaled is not running", "still connecting") with the fix.
+      The bar widget gets the same words in `shepr status --json` (`tailscale`). A running server is never asked: the widget polls it.
+      `shepr pair` also no longer prints the server's own "tailnet requests will be refused" line, which it never needed.
+
+2026-11-14  server only  shyam32 (skovuri41)  https://github.com/skovuri41
+  X: none found (checked 2026-11-14: GitHub lists no X account and no social accounts, and there is no site to read)
+  #4  Agents in named herdr sessions are shown. Every running session (`herdr --session work`) on the machine is a host of its own,
+      called `gus/work`, so its agents reach the queue, the "blocked for" ledger, push and prepare/commit, and `shepr status` (the bar
+      badge) counts them. The two sessions' pane ids stay apart. A session that stops drops out. `SHEPR_SESSIONS` limits which ones
+      (as suggested), and a Shepr already started on a named session's socket (the old workaround) does not list it twice.
+
 2026-10-14  server only  HANCORE  https://github.com/HANCORE-linux
   X: https://x.com/hancore_linux (listed on their GitHub profile, checked 2026-10-13)
   Second review of the Omarchy plugin (omacom/omarchy-plugin-marketplace#11393): the server read a POST body before it

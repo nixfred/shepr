@@ -136,10 +136,19 @@ def bounded_run(cmd, timeout):
     return p.returncode, dec(bufs["out"]), dec(bufs["err"])
 
 
+class Session(str):
+    """The `machine` of a host that is a named herdr session on THIS machine; the string is the session's name. It is a str so
+    every place that carries host["machine"] around keeps working, and run_herdr is the only place that tells it from a
+    saved machine's label."""
+
+
 def run_herdr(machine, args, timeout=10, want_json=True):
-    """Run one herdr command. machine=None is this host; otherwise a saved machine label.
-    --machine goes in front of the subcommand, never combined with --session (herdr --skill)."""
-    cmd = [HERDR] + (["--machine", machine] if machine else []) + list(args)
+    """Run one herdr command. machine=None is this host's plain session; a Session is another named session on this host;
+    otherwise it is a saved machine label. --machine goes in front of the subcommand, never combined with --session (herdr --skill).
+    --session is sent as a flag, not through HERDR_SOCKET_PATH: the flag wins over a socket path this process inherited
+    (checked on herdr 0.9.5: 5 agents with --session hrtest, 18 without, with the inherited path pointing at the default)."""
+    route = ["--session", str(machine)] if isinstance(machine, Session) else (["--machine", machine] if machine else [])
+    cmd = [HERDR] + route + list(args)
     try:
         rc, out, err = bounded_run(cmd, timeout)
     except subprocess.TimeoutExpired:
@@ -164,22 +173,79 @@ def run_herdr(machine, args, timeout=10, want_json=True):
 _tls = threading.local()   # per thread: did THIS thread's last discover_hosts() really read herdr's saved-machine list?
 
 
+SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")   # it becomes a command-line argument: never a leading dash
+SESSIONS_TTL_S = 5.0
+_sessions = {"at": 0.0, "found": [], "read": False}
+
+
+def _same_socket(a, b):
+    return bool(a) and bool(b) and os.path.realpath(os.path.expanduser(a)) == os.path.realpath(os.path.expanduser(b))
+
+
+def local_sessions():
+    """(found, read): the running NAMED herdr sessions on this machine that a plain `herdr` call does not already reach, as
+    [(name, Session)], and whether the list was really read. A plain call reaches the socket in HERDR_SOCKET_PATH, or the default
+    session's when that is unset; that one is the host called LOCAL and is never listed again (a Shepr started with the socket of
+    a named session, as the old workaround did, would otherwise show every agent twice). Read through `herdr session list --json`,
+    kept for SESSIONS_TTL_S because discover_hosts runs on every request. SHEPR_SESSIONS limits it: unset means every running
+    session, a comma list means only those names ("default" is LOCAL's own and adds nothing)."""
+    now = time.time()
+    if now - _sessions["at"] < SESSIONS_TTL_S:
+        return _sessions["found"], _sessions["read"]
+    found, read = [], False
+    only = os.environ.get("SHEPR_SESSIONS")
+    only = None if only is None or only.strip().lower() in ("", "all") else {n.strip() for n in only.split(",") if n.strip()}
+    if only is not None and not only - {"default"}:
+        found, read = [], True   # asked for nothing beyond the plain session: no herdr call at all
+    else:
+        try:
+            raw = run_herdr(None, ["session", "list", "--json"], timeout=6)
+            rows = raw.get("sessions") if isinstance(raw, dict) else raw
+            if isinstance(rows, list):
+                rows = [r for r in rows if isinstance(r, dict) and isinstance(r.get("name"), str)]
+                plain = os.environ.get("HERDR_SOCKET_PATH") or next((r.get("socket_path") for r in rows if r.get("default")), None)
+                for r in rows:
+                    name = r["name"]
+                    up = r.get("running") is True or r.get("status") == "running"
+                    if not up or not SESSION_NAME_RE.match(name) or (only is not None and name not in only):
+                        continue
+                    if r.get("default") and not os.environ.get("HERDR_SOCKET_PATH"):
+                        continue   # the plain call already reaches it
+                    if _same_socket(r.get("socket_path"), plain):
+                        continue
+                    found.append((name, Session(name)))
+                read = True
+        except HerdrError:
+            pass   # an older herdr without `session list`, or herdr down: the plain host is all there is
+    _sessions.update(at=now, found=found, read=read)
+    return found, read
+
+
 def discover_hosts():
-    """Every saved herdr machine plus this host. Sets _tls.listed: True only when the saved-machine list was really read.
-    A failed or skipped read leaves just this host in the answer, and that must never be taken for "every other machine
-    was removed". It is per thread, so another thread's good read can never vouch for this thread's failed one."""
-    _tls.listed = False
+    """Every saved herdr machine, this host, and the other running herdr sessions on this host. Sets _tls.listed: True only
+    when the saved-machine list was really read, and _tls.sessions_listed: True only when the session list was. They are
+    separate because they vouch for different hosts: a herdr with no `session list` must not stop a vanished MACHINE from
+    being forgotten, and a failed machine list must not make a session look gone. A failed or skipped read leaves fewer hosts
+    in the answer, and that must never be taken for "every other machine was removed". They are per thread, so another
+    thread's good read can never vouch for this thread's failed one."""
+    _tls.listed = _tls.sessions_listed = False
     hosts = [{"id": LOCAL, "machine": None, "kind": "local", "enabled": True}]
-    if os.environ.get("SHEPR_LOCAL_ONLY"):   # tests: never read real remote machines, so a machine being up or down cannot change a result
+    if os.environ.get("SHEPR_LOCAL_ONLY"):   # tests: never read real remote machines or other sessions, so one being up or down cannot change a result
         return hosts
+    machines_read = True
     try:
         for m in run_herdr(None, ["machine", "list", "--json"], timeout=6):
             label = m.get("label") or m.get("id")
             if label and label != LOCAL:
                 hosts.append({"id": label, "machine": label, "kind": "remote", "enabled": bool(m.get("enabled"))})
     except HerdrError:
-        return hosts
-    _tls.listed = True
+        machines_read = False
+    found, sessions_read = local_sessions()
+    for name, route in found:   # "<this host>/<session>": the same machine, so kind stays "local" (transcripts, uploads, folders all apply)
+        hid = f"{LOCAL}/{name}"
+        if all(h["id"] != hid for h in hosts):   # a saved machine that happens to be called this keeps the name
+            hosts.append({"id": hid, "machine": route, "kind": "local", "enabled": True, "session": name})
+    _tls.listed, _tls.sessions_listed = machines_read, sessions_read
     return hosts
 
 
@@ -187,12 +253,16 @@ GONE_POLLS = 2   # saved-machine lists in a row, each really read, that must lac
 _absent = {}     # host id -> how many such lists in a row have lacked it
 
 
-def forget_gone_hosts(hosts, listed):
+def forget_gone_hosts(hosts, listed, sessions_listed=None):
     """A saved machine can go away for good (a throwaway container, a cloud box that was deleted). Its ledger rows would
     stay in seen.json for ever, and if the name is used again (a container id that is recycled gives the same label) the new
     machine would inherit the old one's "blocked for" times. So once `GONE_POLLS` real lists in a row have lacked a host,
-    its host entry and every ledger row of it are dropped. A list that could not be read changes nothing."""
-    if not listed:
+    its host entry and every ledger row of it are dropped. A list that could not be read changes nothing. A named session of
+    this host ("<host>/<name>") is judged by the session list, every other host by the saved-machine list; sessions_listed
+    left out means the same as `listed`."""
+    if sessions_listed is None:
+        sessions_listed = listed
+    if not (listed or sessions_listed):
         return
     ids = {h["id"] for h in hosts}
     changed = False
@@ -200,6 +270,8 @@ def forget_gone_hosts(hosts, listed):
         for hid in [k for k in _absent if k in ids]:
             del _absent[hid]
         for hid in [k for k in STATE["hosts"] if k not in ids]:
+            if not (sessions_listed if hid.startswith(LOCAL + "/") else listed):
+                continue   # the list that would have named this host was not read
             _absent[hid] = _absent.get(hid, 0) + 1
             if _absent[hid] < GONE_POLLS:
                 continue
@@ -514,9 +586,9 @@ def poll_all(wait=2.0):
     """Start a poll of every enabled host and wait up to `wait` seconds for the quick ones. A host that is down (an ssh that
     takes 9 s to time out) keeps polling in the background and publishes when it answers: it can no longer make every refresh
     wait for it, or keep the live hosts' data minutes stale."""
-    _tls.listed = False   # a replaced discover_hosts (tests) never sets it, so it can never count as a real list
+    _tls.listed = _tls.sessions_listed = False   # a replaced discover_hosts (tests) never sets them, so they can never count as a real list
     hosts = discover_hosts()
-    forget_gone_hosts(hosts, getattr(_tls, "listed", False))
+    forget_gone_hosts(hosts, getattr(_tls, "listed", False), getattr(_tls, "sessions_listed", False))
     with LOCK:
         HOST_ORDER[:] = [h["id"] for h in hosts]
         for hid in [k for k in HOST_SNAP if k not in HOST_ORDER]:
@@ -2988,6 +3060,41 @@ def unit_hint():
             "nixweb names its unit nixweb-<session>)")
 
 
+# What `tailscale status --json` calls a node that is not connected (checked on tailscale 1.104.7 against a daemon that had never
+# logged in: BackendState "NeedsLogin", exit 0; `tailscale serve` then exits 1 with "Logged out."; `tailscale wait` runs out its
+# whole timeout and exits 1). "Stopped" is what `tailscale down` leaves behind.
+TAILSCALE_STATES = {
+    "Stopped": ("Tailscale is turned off on this machine", "tailscale up"),
+    "NeedsLogin": ("Tailscale is logged out on this machine", "tailscale up"),
+    "NeedsMachineAuth": ("this machine is waiting for approval in the Tailscale admin console", "approve it there"),
+    "InUseOtherUser": ("Tailscale is in use by another user on this machine", "tailscale switch, or ask that user"),
+    "Starting": ("Tailscale is still connecting", "wait a few seconds and try again"),
+    "NoState": ("Tailscale is still connecting", "wait a few seconds and try again"),
+}
+
+
+def tailscale_problem():
+    """None when Tailscale is connected, or when that cannot be told. Otherwise (what is wrong, how to fix it) in plain words.
+    Shepr only answers over the tailnet, so its unit waits for Tailscale and then fails without it. That failure used to look
+    like "the server is not running, start it", which only starts the same wait again. Run only when the server is already
+    down: the bar widget polls `shepr status`, and a running server needs no answer from Tailscale."""
+    try:
+        r = subprocess.run(["tailscale", "status", "--json"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=6)
+    except FileNotFoundError:
+        return "the tailscale command is not installed here", "install Tailscale, then run: tailscale up"
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    try:
+        d = json.loads(r.stdout)
+    except ValueError:
+        # The CLI could not reach the daemon at all (a stopped tailscaled prints its error and exits 1, with no JSON).
+        return "the Tailscale service (tailscaled) is not running", "sudo systemctl enable --now tailscaled"
+    state = d.get("BackendState") if isinstance(d, dict) else None
+    if state == "Running" or not isinstance(state, str):
+        return None
+    return TAILSCALE_STATES.get(state) or (f"Tailscale is not connected (state {state})", "tailscale up")
+
+
 # At boot the user manager can start Shepr before Tailscale is connected. `tailscale serve` then fails ("unexpected
 # state: NoState"), that failure stops the service, and systemd gives up after five quick tries, so the phone finds
 # nothing until someone starts it by hand. This drop-in waits for Tailscale first and never stops retrying.
@@ -3149,6 +3256,10 @@ def cli_pair(a):
         return 0
     info = server_info()
     if not info:
+        ts = tailscale_problem()
+        if ts:   # most likely why it is down: the unit waits for Tailscale, then fails without it, so "start it" alone would just wait again
+            sys.exit(f"shepr: the server is not running here, and {ts[0]}. Shepr only answers over your tailnet, so its unit cannot "
+                     f"come up without Tailscale.\nFix that first ({ts[1]}), then start Shepr: " + unit_hint())
         sys.exit("shepr: the server is not running here. Start it first: " + unit_hint())
     code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(12))
     shown = "-".join(code[i:i + 4] for i in range(0, 12, 4))
@@ -3215,24 +3326,39 @@ def cli_status(a):
     out = {"build": BOOT_BUILD, "running": bool(info), "url": (info or {}).get("url"), "devices": len(devices()),
            "units": unit_names(), "herdr": False, "counts": {}, "waiting": []}
     out["boot_unsafe"] = [n for n in out["units"] if not boot_safe(n)]
-    try:
-        agents = run_herdr(None, ["agent", "list"], timeout=6)["result"]["agents"]
-        labels = {w["workspace_id"]: w.get("label") for w in run_herdr(None, ["workspace", "list"], timeout=6)["result"]["workspaces"]}
-        out["herdr"] = True
+    ts = None if info else tailscale_problem()
+    out["tailscale"] = f"{ts[0]}. Fix: {ts[1]}" if ts else None   # only asked when the server is down
+    def look(route, session):
+        agents = run_herdr(route, ["agent", "list"], timeout=6)["result"]["agents"]
+        labels = {w["workspace_id"]: w.get("label") for w in run_herdr(route, ["workspace", "list"], timeout=6)["result"]["workspaces"]}
         for ag in agents:
             st = ag.get("agent_status") or "unknown"
             out["counts"][st] = out["counts"].get(st, 0) + 1
             if st == "blocked" and len(out["waiting"]) < 12:
-                out["waiting"].append({"project": labels.get(ag.get("workspace_id")) or os.path.basename(ag.get("cwd") or "") or "?",
-                                       "title": ag.get("terminal_title_stripped") or "", "agent": ag.get("agent") or "", "pane": ag.get("pane_id")})
+                w = {"project": labels.get(ag.get("workspace_id")) or os.path.basename(ag.get("cwd") or "") or "?",
+                     "title": ag.get("terminal_title_stripped") or "", "agent": ag.get("agent") or "", "pane": ag.get("pane_id")}
+                if session:
+                    w["session"] = session   # a pane id repeats across sessions, so the session says which one
+                out["waiting"].append(w)
+    try:
+        look(None, None)
+        out["herdr"] = True
     except HerdrError as e:
         out["herdr_error"] = e.message
     except (KeyError, TypeError, AttributeError):
         out["herdr_error"] = "herdr answered in a shape Shepr does not know"
+    if out["herdr"]:   # the other running sessions count too: an agent blocked in "work" is as blocked as one in the default session
+        for name, route in local_sessions()[0]:
+            try:
+                look(route, name)
+            except (HerdrError, KeyError, TypeError, AttributeError):
+                continue   # a session that just stopped must not hide the ones that are up
     if a.json:
         print(json.dumps(out), flush=True)
         return 0
     print(f"shepr {BOOT_BUILD}: " + (f"running at {out['url']}" if out["running"] else f"not running. Start it: {unit_hint()}"))
+    if out["tailscale"]:
+        print(f"  warning: {out['tailscale']}. Shepr needs it to start")
     print(f"  {out['devices']} phone(s) paired" + ("" if out["devices"] else ". Pair one: shepr pair"))
     for n in out["boot_unsafe"]:
         print(f"  warning: {n} may stay down after a reboot (it does not wait for Tailscale). Fix once: shepr fix-boot")
@@ -3352,8 +3478,10 @@ def main():
         ls.add_parser("test", help="send a test card to every running card, to prove the Apple path works")
         s4 = ls.add_parser("forget", help="drop a phone's Live Activity tokens"); s4.add_argument("who")
         a = ap.parse_args()
-        if a.cmd not in ("status", "fix-boot", "live"):
-            learn_tailnet()   # status only reads, and a bar widget polls it, so it skips the tailscale call
+        if a.cmd not in ("status", "fix-boot", "live", "pair"):
+            learn_tailnet()   # status only reads, and a bar widget polls it, so it skips the tailscale call. pair takes the URL from the running
+                              # server's server.json and never checks a request, so with Tailscale off it would only print the server's own
+                              # "tailnet requests will be refused" ahead of the real answer (tailscale_problem)
         sys.exit({"pair": cli_pair, "devices": cli_devices, "revoke": cli_revoke, "status": cli_status,
                   "fix-boot": cli_fix_boot, "live": cli_live}[a.cmd](a))
 
