@@ -1467,6 +1467,222 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     await page.click('#dback').catch(() => {}); await page.waitForTimeout(400);
   }
 
+  // ---- the watch (v49): what the agents have been DOING. Activity and "since you last looked", quiet and risky rows, who is
+  // burning the plan, a project's changes, and a permission that would allow something risky. The server runs with
+  // SHEPR_WATCH_FIXTURE (the burn and the risky commands come from the file written here) and SHEPR_WATCH_S=5.
+  {
+    const fsh = new URL('./fake-session.sh', import.meta.url).pathname;
+    const nowS = Date.now() / 1000, rid = 'ui-' + Date.now();
+    const WF = process.env.SHEPR_WATCH_FIXTURE || '/tmp/claude-1000/shepr-watch.json';
+    const brow = (sid, share, out, ctx, replies, model, helpers, cwd) => ({ sid, share, out, ctx, think: 0, replies, model, models: [model], helpers, last: nowS - 60, cwd, title: '' });
+    const burn = { rows: [brow('ui-sess-1-long-id', 0.46, 412000, 88200000, 212, 'opus', 0.22, '/home/u/Projects/harbor'), brow('ui-sess-2', 0.27, 268000, 51000000, 140, 'sonnet', 0, '/home/u/Projects/tugboat'),
+      brow('ui-sess-3', 0.15, 97000, 30500000, 77, 'fable', 0, '/home/u/Projects/lighthouse'), brow('ui-sess-4', 0.07, 61000, 9800000, 41, 'sonnet', 0, '/home/u/Projects/pier'), brow('ui-sess-5', 0.03, 22000, 2100000, 1, 'haiku', 0, '/home/u/Projects/<u>buoy')],
+      others: { n: 4, share: 0.02 }, sessions: 9, replies: 498, out: 871000, ctx: 184000000, series: Array.from({ length: 24 }, (_, i) => (i === 16 ? 1 : (i % 7) / 10)), models: [{ model: 'opus', share: 0.46 }], now: nowS };
+    fs.writeFileSync(WF, JSON.stringify({ burn, risks: [
+      { t: nowS - 480, sid: 'ui-sess-1-long-id', level: 'danger', what: 'force push', cmd: 'git push --force origin main', id: rid + '-1', cwd: '/home/u/Projects/harbor', sub: false },
+      { t: nowS - 5400, sid: 'ui-sess-2', level: 'note', what: 'recursive delete outside a scratch folder', cmd: 'rm -rf ~/Projects/tugboat/old <img src=x onerror=window.__xss=1>', id: rid + '-2', cwd: '/home/u/Projects/tugboat', sub: true }] }));
+    await tap(page, '.tab[data-view=waiting]'); await page.waitForTimeout(300);
+    const q0 = await page.evaluate(() => window.shepr.S.q.agents.map((a) => ({ host: a.host, pane: a.pane, status: a.status, name: a.wlabel || a.project })));
+    const anyA = q0.find((a) => a.status === 'blocked'), me = anyA.host;
+    fs.appendFileSync(ENV.SHEPR_STATE + '/events.jsonl', [
+      { t: nowS - 7000, ev: 'blocked', host: anyA.host, pane: anyA.pane, label: anyA.name, q: 'Ship <b>this</b> to production?' },
+      { t: nowS - 6400, ev: 'answered', host: anyA.host, pane: anyA.pane, label: anyA.name, wait: 600 },
+      { t: nowS - 5200, ev: 'done', host: me, pane: 'w99:p1', label: 'harbor' },
+      { t: nowS - 3000, ev: 'quiet', host: me, pane: 'w98:p1', label: 'tugboat', mins: 17 },
+      { t: nowS - 1500, ev: 'host_down', host: 'vic', label: 'vic', why: 'timeout: herdr took longer than 9s' },
+      { t: nowS - 900, ev: 'stopped', blocked: 3, done: 1 }].map((e) => JSON.stringify(e)).join('\n') + '\n');
+    const act = (since) => page.evaluate(async (since) => { const p = 'api/activity?limit=300' + (since ? '&since=' + since : ''); return (await fetch(p, { headers: await window.shepr.signHeaders('GET', p, '') })).json(); }, since);
+    let av = null;
+    for (let i = 0; i < 30; i++) { av = await act((nowS - 8000).toFixed(1)); if (av.items && av.items.filter((e) => e.ev === 'risk' && (e.label === 'harbor' || e.label === 'tugboat') && e.t >= nowS - 5500).length >= 2) break; await page.waitForTimeout(700); }
+    const mine = av.items.filter((e) => e.t >= nowS - 7100);
+    check('activity: the host logs the risky commands the watch saw, at the time they ran, with what they were', mine.some((e) => e.ev === 'risk' && e.level === 'danger' && e.what === 'force push' && Math.abs(e.t - (nowS - 480)) < 2 && e.label === 'harbor'));
+    check('activity: newest first', mine.every((e, i) => i === 0 || mine[i - 1].t >= e.t));
+    check('activity: the summary counts each kind since the time asked for, a danger apart from a note', av.summary.risk >= 2 && av.summary.risk_danger >= 1 && av.summary.risk > av.summary.risk_danger && av.summary.blocked >= 1 && av.summary.stopped >= 1 && av.summary.host_down >= 1);
+    check('activity: an entry whose session is open can be opened, a closed one cannot', mine.find((e) => e.ev === 'blocked' && e.pane === anyA.pane).open === true && mine.find((e) => e.ev === 'done' && e.pane === 'w99:p1').open === false);
+
+    // the strip in the Queue, and the sheet behind it
+    await page.evaluate(() => window.shepr.loadActivity(true)); await page.waitForSelector('#activity', { timeout: 8000 });
+    const st = await page.textContent('#activity');
+    check('activity: a strip in the Queue says what happened in the last 24 hours', /ACTIVITY/.test(st) && /\d+ risky/.test(st) && /finished/.test(st));
+    check('activity: it draws one tick per event, and the dangerous one stands tall', await page.evaluate(() => { const d = window.shepr.ACT.data, r = [...document.querySelectorAll('#activity svg rect')];
+      return r.length === d.items.length && r.filter((x) => x.getAttribute('height') === '24').length === d.summary.risk_danger && document.querySelector('#activity .l1.hot') !== null; }));
+    check('activity: the strip sits under the ledger, never above the Start new button', await page.evaluate(() => { const k = [...document.getElementById('main').children].map((n) => n.id); return k[0] === 'newproject' && k.indexOf('activity') > 0 && k.indexOf('activity') < 6; }));
+    await page.screenshot({ path: `${OUT}/w1-activity-strip.png` });
+    await page.click('#activity'); await page.waitForSelector('#actlist .arow', { timeout: 8000 }); await page.waitForTimeout(300);
+    const rows = await page.evaluate(() => [...document.querySelectorAll('#actlist .arow')].map((r) => ({ ev: r.dataset.ev, text: r.textContent, open: r.classList.contains('open') })));
+    check('activity sheet: every kind of event is a row that says what it was', ['risk', 'stopped', 'host_down', 'quiet', 'done', 'answered', 'blocked'].every((k) => rows.some((r) => r.ev === k))
+      && rows.some((r) => r.ev === 'stopped' && /Everything stopped/.test(r.text) && /3 waiting, 1 finished/.test(r.text)) && rows.some((r) => r.ev === 'quiet' && /no output for 17 min/.test(r.text)) && rows.some((r) => r.ev === 'answered' && /after 10m/.test(r.text)));
+    check('activity sheet: a risky command shows the command itself, to read and to copy', await page.evaluate(() => [...document.querySelectorAll('#actlist .arow[data-ev=risk] .acmd')].some((n) => n.textContent === 'git push --force origin main' && n.classList.contains('selectable'))));
+    check('activity sheet: a helper that ran it is named as a helper', rows.some((r) => r.ev === 'risk' && /recursive delete outside a scratch folder \(a helper\)/.test(r.text)));
+    check('activity sheet: text from the host is shown as text, never as markup (a question and a command with tags in them)', await page.evaluate(() => { const l = document.getElementById('actlist');
+      return !l.querySelector('img') && !l.querySelector('.a2 *') && !l.querySelector('.acmd *') && window.__xss === undefined && /Ship <b>this<\/b> to production\?/.test(l.textContent) && /<img src=x onerror=window\.__xss=1>/.test(l.textContent); }));
+    await page.screenshot({ path: `${OUT}/w2-activity-sheet.png` });
+    await page.click('.actseg button[data-f=risk]'); await page.waitForTimeout(200);
+    check('activity sheet: Risky shows only what was run', await page.evaluate(() => { const r = [...document.querySelectorAll('#actlist .arow')]; return r.length >= 2 && r.every((x) => x.dataset.ev === 'risk'); }));
+    await page.click('.actseg button[data-f=asks]'); await page.waitForTimeout(200);
+    check('activity sheet: Questions shows what was asked and when it was answered', await page.evaluate(() => { const r = [...document.querySelectorAll('#actlist .arow')]; return r.length >= 2 && r.every((x) => x.dataset.ev === 'blocked' || x.dataset.ev === 'answered'); }));
+    check('activity sheet: the list scrolls in its own box, the page never does', await page.evaluate(() => { const l = document.getElementById('actlist'), d = document.scrollingElement; return getComputedStyle(l).overflowY === 'auto' && d.scrollHeight <= d.clientHeight && d.scrollWidth <= d.clientWidth; }));
+    await page.evaluate(() => { const r = [...document.querySelectorAll('#actlist .arow.open')][0]; const b = r.getBoundingClientRect(), o = { bubbles: true, clientX: b.x + 20, clientY: b.y + 12, pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0 };
+      r.dispatchEvent(new PointerEvent('pointerdown', o)); r.dispatchEvent(new PointerEvent('pointerup', o)); });
+    await page.waitForSelector('#detail:not([hidden])', { timeout: 6000 });
+    check('activity sheet: tapping an entry of an open session goes to that session, and sends nothing', await page.evaluate((k) => { const c = window.shepr.S.cur; return c && c.host + '|' + c.pane === k && !window.shepr.S.sheetOpen; }, anyA.host + '|' + anyA.pane));
+    await page.click('#dback'); await page.waitForTimeout(400);
+
+    // since you last looked
+    await page.evaluate(() => { window.shepr.S.catchUp = null; localStorage.setItem('shepr.lastLook', JSON.stringify(Date.now() - 2 * 3600 * 1000)); window.shepr.checkAway(); });
+    await page.waitForSelector('#catchup', { timeout: 8000 });
+    const cu = await page.textContent('#catchup');
+    check('catch-up: back after two hours, the Queue leads with what changed meanwhile', /WHILE YOU WERE AWAY/.test(cu) && /2h 00m/.test(cu) && /\d+ risky command/.test(cu) && /finished/.test(cu));
+    check('catch-up: three chips and a count of the rest: it is a glance, not a list', await page.evaluate(() => { const c = [...document.querySelectorAll('#catchup .cchip')]; return c.length === 4 && /^\+\d+ more$/.test(c[3].textContent); }));
+    check('catch-up: "last looked" does not move while the card is still unread', await page.evaluate(() => { window.shepr.noteLook(); return Date.now() - JSON.parse(localStorage.getItem('shepr.lastLook')) > 7000 * 1000; }));
+    await page.screenshot({ path: `${OUT}/w3-catchup.png` });
+    await page.evaluate(() => [...document.querySelectorAll('#catchup button')].find((b) => b.textContent === 'See it').click());
+    await page.waitForSelector('#actlist .arow', { timeout: 8000 });
+    check('catch-up: See it opens the activity from the moment you left, and the card is done', /since you last looked/.test(await page.textContent('#sheet')) && (await page.$('#catchup')) === null
+      && await page.evaluate(() => Date.now() - JSON.parse(localStorage.getItem('shepr.lastLook')) < 20000));
+    await page.evaluate(() => document.getElementById('shade').click()); await page.waitForTimeout(300);
+    await page.evaluate(() => { localStorage.setItem('shepr.lastLook', JSON.stringify(Date.now() - 5 * 60 * 1000)); window.shepr.checkAway(); }); await page.waitForTimeout(900);
+    check('catch-up: a short absence shows nothing', (await page.$('#catchup')) === null);
+
+    // what the watch adds to a row (drawn from the queue the host sends: the host side is tests/watch_server_test.py)
+    const drawn = await page.evaluate(() => {
+      const S = window.shepr.S, lim = S.q.quiet_min * 60, w = S.q.agents.find((a) => a.status === 'working'), idle = S.q.agents.filter((a) => a.status === 'idle');
+      w.work_s = 41 * 60; w.quiet_s = lim - 30;
+      const out = { lim: S.q.quiet_min };
+      window.shepr.paintMain();
+      const row = (a) => document.querySelector('.item[data-key="' + a.host + '|' + a.pane + '"]');
+      out.busy = row(w).querySelector('.age').className + '|' + row(w).querySelector('.age').textContent;
+      w.quiet_s = lim + 2 * 60; w.risk = { level: 'danger', what: 'discarded local changes (git reset --hard)', t: S.q.now - 480 };
+      if (idle[0]) { idle[0].status = 'working'; idle[0].work_s = 120; }
+      S.q.fleet = { working: 0, blocked: 3, done: 1, stopped_at: S.q.now - 900 };
+      window.shepr.paintMain();
+      out.quiet = row(w).querySelector('.age').className + '|' + row(w).querySelector('.age').textContent;
+      out.risk = row(w).querySelector('.sub.risk') ? row(w).querySelector('.sub.risk').className + '|' + row(w).querySelector('.sub.risk').textContent : null;
+      out.first = idle[0] ? [...document.querySelectorAll('.item.working')][0].dataset.key === w.host + '|' + w.pane : true;
+      out.stopped = document.getElementById('stopped') ? document.getElementById('stopped').textContent : null;
+      out.isq = [window.shepr.isQuiet(w), window.shepr.isQuiet(Object.assign({}, w, { quiet_s: lim - 1 })), window.shepr.isQuiet(Object.assign({}, w, { status: 'idle' }))];
+      S.tab = 'all'; window.shepr.paintMain(); out.radar = document.querySelectorAll('.radar .rdot.quiet').length; S.tab = 'waiting'; window.shepr.paintMain();
+      return out;
+    });
+    check('queue: a working agent whose turn Shepr watched begin says how long it has run', /busy/.test(drawn.busy) && /41m/.test(drawn.busy) && /working/.test(drawn.busy));
+    check('queue: one that has written nothing for the host\'s threshold says QUIET, in its own colour, with how long', /quiet/.test(drawn.quiet) && new RegExp((drawn.lim + 2) + 'm').test(drawn.quiet));
+    check('queue: quiet is working AND past the threshold, nothing else', drawn.isq.join() === 'true,false,false');
+    check('queue: the quiet one is listed first among the working', drawn.first === true);
+    check('queue: a row says what its agent ran in the last hour, and when, without the command', /danger/.test(drawn.risk) && /discarded local changes · 8m ago/.test(drawn.risk) && !/reset --hard/.test(drawn.risk));
+    check('queue: when nothing is working any more and something waits, the top of the Queue says so', /EVERYTHING HAS STOPPED/.test(drawn.stopped) && /15m ago/.test(drawn.stopped) && /3 waiting on you, 1 finished/.test(drawn.stopped));
+    check('radar: a quiet agent\'s dot is marked', drawn.radar === 1);
+    await page.screenshot({ path: `${OUT}/w4-queue-watch.png` });
+    await page.evaluate(() => window.shepr.fetchQueue(true)); await page.waitForTimeout(600);
+
+    // who is burning it
+    await tap(page, '.tab[data-view=subs]'); await page.waitForSelector('.sc[data-id=claude] #burnbtn', { timeout: 10000 }); await page.waitForTimeout(600);
+    const fitB = await page.evaluate(() => { const m = document.getElementById('main'), w = document.getElementById('burnbtn').getBoundingClientRect(), n = document.querySelector('.sc[data-id=claude] .sc-n').getBoundingClientRect();
+      return { scrolls: m.scrollHeight > m.clientHeight + 1, inHead: Math.abs((w.top + w.bottom) / 2 - (n.top + n.bottom) / 2) < 8, cards: document.querySelectorAll('#budget .sc').length, kids: document.getElementById('budget').children.length }; });
+    check('burn: the Claude card carries a WHO chip in its header, and nothing is added under the plan cards (the one-screen fit above still holds)', fitB.inHead && fitB.kids === fitB.cards + 1);
+    await page.click('#burnbtn'); await page.waitForSelector('#sheet:not([hidden]) #burncard .bn-r', { timeout: 10000 }); await page.waitForTimeout(400);
+    const bc = await page.evaluate(() => ({ rows: [...document.querySelectorAll('#burncard .bn-r')].map((r) => ({ t: r.textContent, w: r.querySelector('.sc-bar i').style.width, open: r.classList.contains('open'), sid: r.dataset.sid })),
+      spark: document.querySelectorAll('#burncard .bn-spark rect').length, peak: document.querySelectorAll('#burncard .bn-spark rect.peak').length, text: document.getElementById('sheet').textContent,
+      own: getComputedStyle(document.querySelector('#sheet .bnlist')).overflowY, tags: document.querySelectorAll('#burncard u').length }));
+    check('burn: the sheet lists who is burning the plan, one row per session, biggest first', /Who is burning it/.test(bc.text) && bc.rows.length === 5 && /^harbor/.test(bc.rows[0].t) && /46%/.test(bc.rows[0].t) && /27%/.test(bc.rows[1].t));
+    check('burn: each row has the model, the exact counts and how much was its helpers', /opus/.test(bc.rows[0].t) && /412k out · 88\.2M read · 212 replies · 22% helpers/.test(bc.rows[0].t) && /fable/.test(bc.rows[2].t) && /1 reply/.test(bc.rows[4].t));
+    check('burn: the bars are drawn against the biggest (100%, then 59%)', bc.rows[0].w === '100%' && bc.rows[1].w === '59%');
+    check('burn: a session that is not open in herdr says closed and is not a button', bc.rows.every((r) => /closed/.test(r.t) && !r.open));
+    check('burn: only the first 8 characters of a session id reach the phone', bc.rows[0].sid === 'ui-sess-' && !/long-id/.test(bc.text));
+    check('burn: the host\'s burn over the span is a 24-step chart with its peak marked', bc.spark === 24 && bc.peak === 1);
+    check('burn: it says a share is an estimate and that other machines are not counted', /estimate/.test(bc.text) && /other machines are not counted/.test(bc.text) && /4 more sessions: 2% between them/.test(bc.text));
+    check('burn: a folder name with tags in it is text', bc.tags === 0 && /<u>buoy/.test(bc.rows[4].t));
+    await page.screenshot({ path: `${OUT}/w5-burn.png` });
+    const req = page.waitForRequest((r) => /api\/burn\?span=1h/.test(r.url()), { timeout: 6000 }).then(() => true).catch(() => false);
+    await page.click('#burncard .bn-span[data-span="1h"]');
+    check('burn: 1h, 5h and 24h ask the host for that span, and the choice is remembered', (await req) && await page.evaluate(() => JSON.parse(localStorage.getItem('shepr.burnspan')) === '1h'));
+    await page.waitForSelector('#burncard .bn-span.on[data-span="1h"]'); await page.click('#burncard .bn-span[data-span="5h"]'); await page.waitForTimeout(500);
+    check('burn: the list scrolls in its own box and the page itself never does', bc.own === 'auto' && await page.evaluate(() => { const d = document.scrollingElement; return d.scrollHeight <= d.clientHeight && d.scrollWidth <= d.clientWidth; }));
+    await page.evaluate(() => [...document.querySelectorAll('#sheet .btns button')].find((b) => b.textContent === 'Close').click()); await page.waitForTimeout(300);
+
+    // changes: a made-up git project with one changed file and two new ones
+    execFileSync('bash', [fsh, 'changes', 'odd'], { env: ENV, encoding: 'utf8' });
+    await tap(page, '.tab[data-view=waiting]');
+    let ship = null;
+    for (let i = 0; i < 20 && !ship; i++) { await page.evaluate(() => window.shepr.fetchQueue(true)); await page.waitForTimeout(600); ship = await page.evaluate(() => window.shepr.S.q.agents.find((a) => (a.wlabel || a.project) === 'shipyard') || null); }
+    await tap(page, `.item[data-key="${ship.host}|${ship.pane}"]`); await page.waitForSelector('#detail:not([hidden])'); await page.waitForTimeout(900);
+    check('changes: a session on this machine has a Changes button', await page.isVisible('#dchanges'));
+    await page.click('#dchanges'); await page.waitForSelector('#chgfiles .crow', { timeout: 8000 }); await page.waitForTimeout(300);
+    const ch = await page.evaluate(() => ({ pills: [...document.querySelectorAll('#chg .pill')].map((p) => p.textContent), sub: document.querySelector('#sheet .sub').textContent,
+      files: [...document.querySelectorAll('#chgfiles .crow')].map((r) => r.textContent), commits: [...document.querySelectorAll('#chg .crow.com')].map((r) => r.textContent), tags: document.querySelectorAll('#chg i, #chg .cp *').length }));
+    check('changes: the branch, that nothing is pushed anywhere, and how many files changed', ch.pills.join('|') === 'main|no upstream|4 files changed');
+    check('changes: the uncommitted lines, added and deleted', /\+3 −2 lines not committed/.test(ch.sub));
+    check('changes: each file says what happened to it, with its line counts', ch.files.some((f) => /^changedloader\.py\+3 −2$/.test(f)) && ch.files.some((f) => /^newNOTES\.md$/.test(f)));
+    check('changes: a file name with tags in it is shown as text', ch.tags === 0 && ch.files.some((f) => f.includes('<i>odd name.txt')));
+    check('changes: the latest commits', ch.commits.length === 1 && /first cut of the loader/.test(ch.commits[0]));
+    await page.screenshot({ path: `${OUT}/w6-changes.png` });
+    await page.evaluate(() => { const r = [...document.querySelectorAll('#chgfiles .crow')].find((x) => x.dataset.path === 'loader.py'); const b = r.getBoundingClientRect(), o = { bubbles: true, clientX: b.x + 30, clientY: b.y + 10, pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0 };
+      r.dispatchEvent(new PointerEvent('pointerdown', o)); r.dispatchEvent(new PointerEvent('pointerup', o)); });
+    await page.waitForSelector('#dview .dl', { timeout: 8000 });
+    const dv = await page.evaluate(() => ({ add: [...document.querySelectorAll('#dview .dl.add')].map((n) => n.textContent), del: document.querySelectorAll('#dview .dl.del').length, hunk: document.querySelectorAll('#dview .dl.hunk').length,
+      sub: document.querySelector('#sheet .sub').textContent, own: getComputedStyle(document.getElementById('dview')).overflowY }));
+    check('changes: tapping a file shows its diff, added and removed lines apart', dv.add.length === 3 && dv.add[0] === '+def load(path, encoding="utf-8"):' && dv.del === 2 && dv.hunk === 1 && dv.sub === 'loader.py');
+    check('changes: the diff scrolls in its own box', dv.own === 'auto' && await page.evaluate(() => { const d = document.scrollingElement; return d.scrollHeight <= d.clientHeight && d.scrollWidth <= d.clientWidth; }));
+    await page.screenshot({ path: `${OUT}/w7-diff.png` });
+    await page.evaluate(() => [...document.querySelectorAll('#sheet .btns button')].find((b) => /Files/.test(b.textContent)).click()); await page.waitForSelector('#chgfiles .crow');
+    await page.evaluate(() => { const r = [...document.querySelectorAll('#chgfiles .crow')].find((x) => x.dataset.path.includes('odd name')); const b = r.getBoundingClientRect(), o = { bubbles: true, clientX: b.x + 30, clientY: b.y + 10, pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0 };
+      r.dispatchEvent(new PointerEvent('pointerdown', o)); r.dispatchEvent(new PointerEvent('pointerup', o)); });
+    await page.waitForSelector('#dview .dl.add', { timeout: 8000 });
+    check('changes: a new file is shown whole, and Files goes back to the list', await page.evaluate(() => document.querySelector('#dview .dl.add').textContent === '+plain text, not markup'));
+    await page.evaluate(() => [...document.querySelectorAll('#sheet .btns button')].find((b) => b.textContent === 'Close').click()); await page.waitForTimeout(300);
+    check('changes: a session on another machine has no Changes button (its files are not here)', await page.evaluate(() => { const S = window.shepr.S, real = S.q.hosts; S.q.hosts = real.map((h) => Object.assign({}, h, { kind: 'remote' }));
+      window.shepr.S.agent && window.shepr.safeRender(); const hid = document.getElementById('dchanges').hidden; S.q.hosts = real; window.shepr.safeRender(); return hid && !document.getElementById('dchanges').hidden; }));
+    await page.click('#dback'); await page.waitForTimeout(400);
+    execFileSync('bash', [fsh, 'changes-rm'], { env: ENV, encoding: 'utf8' });
+
+    // a permission dialog that would allow something risky
+    execFileSync('bash', [fsh, 'risk'], { env: ENV, encoding: 'utf8' });
+    let rk = null;
+    for (let i = 0; i < 20 && !rk; i++) { await page.evaluate(() => window.shepr.fetchQueue(true)); await page.waitForTimeout(600); rk = await page.evaluate(() => window.shepr.S.q.agents.find((a) => (a.wlabel || a.project) === 'riskdemo' && a.status === 'blocked') || null); }
+    await tap(page, `.item[data-key="${rk.host}|${rk.pane}"]`); await page.waitForSelector('#optrow button', { timeout: 8000 }); await page.waitForTimeout(500);
+    check('risky approval: the open session knows what the dialog would allow', await page.evaluate(() => { const r = window.shepr.S.menu && window.shepr.S.menu.risk; return !!r && r.level === 'danger' && r.what === 'force push'; }));
+    await page.click('#optrow button'); await page.waitForSelector('#planrisk', { timeout: 8000 });
+    const pr = await page.evaluate(() => ({ risk: document.getElementById('planrisk').textContent, kv: document.querySelector('#sheet .kv').textContent, dis: document.querySelector('#sheet .btns .go').disabled }));
+    check('risky approval: the confirm sheet says in plain words what it allows, before anything is sent', /FORCE PUSH/.test(pr.risk) && /Careful/.test(pr.kv) && /what this allows looks like: force push/.test(pr.kv));
+    await page.waitForTimeout(1000);
+    const still = await page.evaluate(() => document.querySelector('#sheet .btns .go').disabled);
+    await page.waitForTimeout(1900);
+    check('risky approval: Send stays dead for 2.5 s instead of 0.7 s, so it can be read', pr.dis === true && still === true && await page.evaluate(() => document.querySelector('#sheet .btns .go').disabled === false));
+    await page.screenshot({ path: `${OUT}/w8-risky-approval.png` });
+    await page.evaluate(() => [...document.querySelectorAll('#sheet .btns button')].find((b) => b.textContent === 'Cancel').click()); await page.waitForTimeout(300);
+    await page.evaluate(() => [...document.querySelectorAll('#optrow button')].pop().click()); await page.waitForSelector('#sheet:not([hidden]) .kv', { timeout: 8000 });
+    check('risky approval: refusing it carries no warning', (await page.$('#planrisk')) === null);
+    await page.evaluate(() => [...document.querySelectorAll('#sheet .btns button')].find((b) => b.textContent === 'Cancel').click()); await page.waitForTimeout(200);
+    await page.click('#dback'); await page.waitForTimeout(300);
+    execFileSync('bash', [fsh, 'risk-rm'], { env: ENV, encoding: 'utf8' });
+
+    // v49 fixes on the phone
+    check('fix: a named session in the Hosts tab says what it is and has no switch', await page.evaluate(() => { window.shepr.S.hosts = window.shepr.S.hosts || { writes: true };
+      const r = window.shepr.hostRow({ id: 'box/work', kind: 'session', enabled: true, status: 'ok', counts: { blocked: 1 } }); return /box\/work · a herdr session here/.test(r.textContent) && /1 blocked/.test(r.textContent) && !r.querySelector('button'); }));
+    const p2 = await ctx.newPage();
+    await p2.goto(BASE + '/#' + encodeURIComponent('box/work') + '/' + encodeURIComponent('w1:p1'));
+    const cur = await p2.waitForFunction(() => window.shepr && window.shepr.S.cur, null, { timeout: 15000 }).then((h) => h.jsonValue()).catch(() => null);
+    check('fix: a link to a session on a named-session host (its name has a slash) opens that session', !!cur && cur.host === 'box/work' && cur.pane === 'w1:p1');
+    await p2.close();
+    await page.route('**/api/queue*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ now: Date.now() / 1000, agents: [], age_s: 0, poll_s: 3 }) }));
+    const drew = await page.evaluate(async () => { window.shepr.S.drawErr = false; await window.shepr.fetchQueue(true); await new Promise((r) => setTimeout(r, 300));
+      return { toast: (document.getElementById('gtoast') || {}).textContent || '', off: document.getElementById('net').classList.contains('off'), banner: document.getElementById('offline').hidden }; });
+    check('fix: a mistake while DRAWING the queue says so, and is not shown as a host that cannot be reached', /could not draw/.test(drew.toast) && drew.off === false && drew.banner === true);
+    await page.unroute('**/api/queue*');
+    await page.evaluate(async () => { const t = document.getElementById('gtoast'); if (t) t.hidden = true; window.shepr.S.drawErr = false; await window.shepr.fetchQueue(true); }); await page.waitForTimeout(500);
+    check('fix: outside a Home Screen app there is no notification nudge (an iPhone could not turn them on there)', await page.evaluate(() => { localStorage.removeItem('shepr.nudgeAt'); window.shepr.paintMain(); return window.shepr.standalone === false && !document.getElementById('pushnudge'); }));
+    await ctx.grantPermissions(['notifications']);
+    const p3 = await ctx.newPage();
+    await p3.addInitScript(() => { Object.defineProperty(navigator, 'standalone', { value: true, configurable: true }); });   // what iOS reports inside a Home Screen app
+    await p3.goto(BASE + '/'); await p3.waitForFunction(() => window.shepr && window.shepr.S.q, null, { timeout: 15000 }); await p3.waitForTimeout(500);
+    const nud = await p3.evaluate(() => { localStorage.removeItem('shepr.nudgeAt'); window.shepr.paintMain(); const n = document.getElementById('pushnudge'); if (!n) return { perm: Notification.permission, on: window.shepr.S.q.push_on };
+      const t = n.textContent, tag = n.tagName; [...n.querySelectorAll('button')].find((b) => b.textContent === 'Not now').click();
+      return { perm: Notification.permission, text: t, tag, gone: !document.getElementById('pushnudge'), kept: !!localStorage.getItem('shepr.nudgeAt') }; });
+    check('fix: a Home Screen app with notifications off says so in the Queue, and Not now keeps it quiet for a week', nud.perm === 'denied' || (/NO NOTIFICATIONS ON THIS PHONE/.test(nud.text || '') && nud.tag === 'ASIDE' && nud.gone && nud.kept));
+    await p3.close();
+    await ctx.clearPermissions();
+    await page.evaluate(() => { localStorage.setItem('shepr.nudgeAt', JSON.stringify(Date.now())); return window.shepr.fetchQueue(true); }); await page.waitForTimeout(400);
+  }
+
   // ---- revocation signs the phone out
   cli('revoke', myId);
   await page.evaluate(() => window.shepr.S.q && fetch('api/queue').catch(() => 0));

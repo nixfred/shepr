@@ -23,6 +23,7 @@ import argparse
 import base64
 import concurrent.futures
 import contextlib
+import email.header
 import fcntl
 import functools
 import glob
@@ -41,6 +42,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -50,6 +52,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))   # realpath: `shepr` is a sy
 sys.path.insert(0, HERE)   # usage.py sits beside this file, whichever way it was started or imported
 import usage  # noqa: E402
 import live as shepr_live  # noqa: E402   (the Lock Screen Live Activity: ios/ draws it, this feeds it)
+import watch as shepr_watch  # noqa: E402   (what the agents here have been doing, from Claude Code's own session files)
 HERDR = os.environ.get("HERDR_BIN", "herdr")
 LOCAL = os.environ.get("SHEPR_LABEL") or socket.gethostname().split(".")[0]
 READONLY = os.environ.get("SHEPR_READONLY") == "1"
@@ -354,7 +357,10 @@ def transcript_mtime(agent):
     """The session transcript stops being written the moment the agent blocks, so its mtime is a good
     estimate of WHEN it blocked for a session that was already blocked before we started watching."""
     p = transcript_file(agent)
-    return os.path.getmtime(p) if p else None
+    try:
+        return os.path.getmtime(p) if p else None
+    except OSError:   # the session file went away between the look and the stat
+        return None
 
 
 # --------------------------------------------------------------------------------------------
@@ -473,7 +479,12 @@ def note_seen(host, agents, now, ws=None):
     prev_ok = hs.get("last_ok")
     exact_ok = prev_ok is not None and now - prev_ok <= 3 * POLL_S
     live, changed = set(), False
+    live_w = set()
     for a in agents:
+        if a["agent_status"] == "working":   # when a turn began, for "working 12m" and for "quiet since": kept in memory only
+            wk = f"{hid}|{a['pane_id']}|{a.get('state_change_seq')}"
+            live_w.add(wk)
+            WORKING.setdefault(wk, {"t": now, "exact": exact_ok})
         if a["agent_status"] not in ("blocked", "done"):
             continue
         key = f"{hid}|{a['pane_id']}|{a.get('state_change_seq')}|{a['agent_status']}"
@@ -489,11 +500,17 @@ def note_seen(host, agents, now, ws=None):
         STATE["seen"][key] = {"t": t, "exact": exact_ok, "basis": basis, "label": label}
         if exact_ok:   # a transition we watched happen (not what was already true when the host started)
             PUSH_EVENTS.append(a["agent_status"])
+            ask = a.get("_ask") if isinstance(a.get("_ask"), dict) else {}
+            log_event(a["agent_status"], hid, a["pane_id"], label, **({"q": str(ask["q"])[:160]} if a["agent_status"] == "blocked" and ask.get("q") else {}))
         changed = True
     for key in [k for k in STATE["seen"] if k.startswith(hid + "|") and k not in live]:
         ent = STATE["seen"].pop(key); changed = True
         if exact_ok and ent.get("exact") and key.endswith("|blocked"):   # a wait we watched from its first moment to its last
             record_wait(hid, ent.get("label") or key.split("|")[1], ent["t"], now)
+            log_event("answered", hid, key.split("|")[1], ent.get("label") or key.split("|")[1], wait=int(max(0, now - ent["t"])))
+    for wk in [k for k in WORKING if k.startswith(hid + "|") and k not in live_w]:
+        del WORKING[wk]
+        QUIET_TOLD.discard(wk)
     hs["last_ok"] = now
     if changed or prev_ok is None or now - prev_ok > 60:
         try:
@@ -503,6 +520,206 @@ def note_seen(host, agents, now, ws=None):
 
 
 ASLEEP_N = {}   # host id -> how many herdr workspaces have no agent running (the count behind "Asleep")
+
+# ---- the watch: what agents are doing, on top of whether they wait. See watch.py for the reading of Claude Code's session files.
+WATCH_ON = os.environ.get("SHEPR_WATCH", "1") != "0"
+WATCH_EVERY_S = max(5.0, float(os.environ.get("SHEPR_WATCH_S", "60")))
+QUIET_S = max(60.0, float(os.environ.get("SHEPR_QUIET_MIN", "15")) * 60)   # a working agent that has written nothing for this long is "quiet"
+FLEET_STOP_S = 45.0              # nothing working for this long, with something waiting, is "everything has stopped"
+WATCH_FIXTURE = os.environ.get("SHEPR_WATCH_FIXTURE")   # tests only: {"burn": {...}, "risks": [...]} returned as it is
+WATCH = shepr_watch.Watch(CLAUDE_HOME)
+BOOT_T = time.time()
+WORKING = {}        # "host|pane|seq" -> {"t", "exact"}: when Shepr saw that turn begin
+QUIET_TOLD = set()  # working keys already reported as quiet, so one silence is one notice
+SID_AGENT = {}      # Claude session id -> {"host", "pane", "label"} for sessions that are open in herdr right now
+FLEET = {"had_work": False, "stopped_at": None, "told": False}
+RISK_SEEN = set()   # tool-use ids of risky commands already written to the activity log
+EVENT_KEEP_DAYS = 7
+EVENT_MAX_BYTES = 2 << 20
+
+
+def log_event(ev, host=None, pane=None, label=None, t=None, **more):
+    """One line in events.jsonl: something happened that a person may want to read later ("what did they do while I was away").
+    Owner-only, like every file here. A failure to write is never the caller's problem."""
+    rec = {"t": round(t if t is not None else time.time(), 1), "ev": ev}
+    if host:
+        rec["host"] = host
+    if pane:
+        rec["pane"] = pane
+    if label:
+        rec["label"] = str(label)[:60]
+    rec.update({k: v for k, v in more.items() if v is not None})
+    try:
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        fd = os.open(state_path("events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def read_events(since, limit=2000):
+    """The events newer than `since`, oldest first. Only the tail of the file is read."""
+    out = []
+    try:
+        with open(state_path("events.jsonl"), "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - EVENT_MAX_BYTES))
+            lines = f.read().decode("utf-8", "replace").split("\n")
+        if size > EVENT_MAX_BYTES:
+            lines = lines[1:]   # the first one may be half a line
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            e = json.loads(line)
+            if isinstance(e, dict) and isinstance(e.get("ev"), str) and float(e["t"]) > since:
+                out.append(e)
+        except (ValueError, KeyError, TypeError):
+            continue
+    return out[-limit:]
+
+
+def prune_events():
+    """Once at start: drop what is older than EVENT_KEEP_DAYS, and remember which risky commands were already logged."""
+    keep = read_events(time.time() - EVENT_KEEP_DAYS * 86400, limit=20000)
+    RISK_SEEN.update(e["id"] for e in keep if e.get("ev") == "risk" and isinstance(e.get("id"), str))
+    try:
+        with open(state_path("events.jsonl"), "rb") as f:
+            before = sum(1 for _ in f)
+    except OSError:
+        return
+    if len(keep) < before:
+        fd = os.open(state_path("events.jsonl.tmp"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            for e in keep:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        os.replace(state_path("events.jsonl.tmp"), state_path("events.jsonl"))
+
+
+def session_written(agent):
+    """Local Claude only: when this session, or one of its helpers, last wrote to its session file. None when there is no file."""
+    p = transcript_file(agent)
+    if not p:
+        return None
+    try:
+        t = os.path.getmtime(p)
+        sub = os.path.join(p[:-len(".jsonl")], "subagents")
+        if os.path.isdir(sub):
+            for e in os.scandir(sub):
+                if e.name.endswith(".jsonl"):
+                    t = max(t, e.stat().st_mtime)
+        return t
+    except OSError:
+        return None
+
+
+def watch_local(host, agents, ws, now):
+    """For a host that is this machine: which Claude session each open terminal holds, when each working one last wrote, and
+    which have gone quiet. Called under LOCK from the poll. A remote host has no session files here, so it is never judged."""
+    hid = host["id"]
+    for sid in [k for k, v in SID_AGENT.items() if v["host"] == hid]:
+        del SID_AGENT[sid]
+    for a in agents:
+        sess = a.get("agent_session") or {}
+        label = (ws or {}).get(a.get("workspace_id")) or os.path.basename((a.get("cwd") or "").rstrip("/")) or a["pane_id"]
+        if sess.get("agent") == "claude" and sess.get("kind") == "id" and isinstance(sess.get("value"), str):
+            SID_AGENT[sess["value"]] = {"host": hid, "pane": a["pane_id"], "label": label, "status": a["agent_status"]}
+        if a["agent_status"] != "working":
+            continue
+        wrote = session_written(a)
+        a["_active"] = wrote
+        wk = f"{hid}|{a['pane_id']}|{a.get('state_change_seq')}"
+        began = WORKING.get(wk) or {"t": now, "exact": False}
+        if wrote is None:
+            continue
+        quiet = now - max(wrote, began["t"] if began["exact"] else wrote)
+        if quiet >= QUIET_S and wk not in QUIET_TOLD:
+            QUIET_TOLD.add(wk)
+            log_event("quiet", hid, a["pane_id"], label, mins=int(quiet // 60))
+            PUSH_EVENTS.append("quiet")
+        elif quiet < QUIET_S / 2:
+            QUIET_TOLD.discard(wk)   # it wrote again: a later silence is news again
+
+
+def fleet_watch(agents, hosts, now):
+    """Everything has stopped: nothing is working any more and something is waiting on a person. Said once per stop, and only
+    after it has held for FLEET_STOP_S (an agent between two steps is not a stop). Never judged while a host cannot be read."""
+    if any(h.get("status") == "down" for h in hosts):
+        return
+    working = sum(1 for a in agents if a["status"] == "working")
+    blocked = sum(1 for a in agents if a["status"] == "blocked")
+    done = sum(1 for a in agents if a["status"] == "done")
+    if working:
+        FLEET.update(had_work=True, stopped_at=None, told=False)
+    elif not (blocked or done):
+        FLEET.update(stopped_at=None)
+    elif FLEET["had_work"]:
+        if FLEET["stopped_at"] is None:
+            FLEET["stopped_at"] = now
+        elif not FLEET["told"] and now - FLEET["stopped_at"] >= FLEET_STOP_S:
+            FLEET["told"] = True
+            log_event("stopped", blocked=blocked, done=done)
+            PUSH_EVENTS.append("stopped")
+
+
+def watch_risks():
+    """The risky commands the watch has seen (or the test fixture's), newest first."""
+    if WATCH_FIXTURE:
+        return [r for r in (_watch_fixture().get("risks") or []) if isinstance(r, dict)]
+    return WATCH.risks(limit=shepr_watch.CMD_KEEP)
+
+
+def _watch_fixture():
+    try:
+        with open(WATCH_FIXTURE) as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def note_risks():
+    """Write each newly seen risky command to the activity log once. One that ran after this server started, and only in the
+    last few minutes, also counts as news for a phone that asked to be told (a danger, never a mere note)."""
+    now = time.time()
+    with LOCK:
+        for r in reversed(watch_risks()):   # oldest first, so the log stays in time order
+            rid = r.get("id") or f"{r.get('sid')}@{r.get('t')}"
+            if rid in RISK_SEEN:
+                continue
+            RISK_SEEN.add(rid)
+            ag = SID_AGENT.get(r.get("sid")) or {}
+            label = ag.get("label") or os.path.basename(str(r.get("cwd") or "").rstrip("/")) or str(r.get("sid") or "")[:8]
+            log_event("risk", ag.get("host") or LOCAL, ag.get("pane"), label, t=r.get("t"), level=r.get("level"), what=r.get("what"),
+                      cmd=str(r.get("cmd") or "")[:240], id=rid, helper=bool(r.get("sub")) or None)
+            if r.get("level") == "danger" and (r.get("t") or 0) > max(BOOT_T, now - 600):
+                PUSH_EVENTS.append("risk")
+        pending = bool(PUSH_EVENTS)
+    if pending:
+        _publish()   # hands the events to the push dispatcher
+
+
+def watch_loop():
+    time.sleep(5)   # the first poll goes first
+    first, pruned = True, time.time()
+    while True:
+        try:
+            t0 = time.time()
+            if t0 - pruned > 86400:   # a server that runs for months must not let the activity log grow without end
+                pruned = t0
+                prune_events()
+            if not WATCH_FIXTURE:
+                WATCH.refresh()
+            note_risks()
+            if first:   # one journal line, so a watch that is alive is visibly alive (and how much the first pass cost)
+                first = False
+                print(f"shepr: watch: {len(WATCH.sess)} Claude sessions written in the last {int(shepr_watch.KEEP_S // 3600)} h, {len(WATCH.msgs)} replies, "
+                      f"{len(WATCH.cmds)} risky commands; the first pass took {time.time() - t0:.1f} s", file=sys.stderr, flush=True)
+        except Exception as e:   # the watch must never take the server with it
+            print(f"shepr: watch pass failed: {e!r}", file=sys.stderr, flush=True)
+        time.sleep(WATCH_EVERY_S)
 
 
 def poll_host(host):
@@ -538,6 +755,8 @@ def _poll_host(host):
         ws = {}
     with LOCK:
         note_seen(host, agents, now, ws)
+        if host["kind"] == "local":
+            watch_local(host, agents, ws, now)
     return host, agents, ws, None
 
 
@@ -556,6 +775,7 @@ def _publish():
             if e:
                 hosts.append(e["entry"]); agents.extend(e["agents"])
         SNAP.update(ts=time.time(), hosts=hosts, agents=agents, polls=SNAP["polls"] + 1)
+        fleet_watch(agents, hosts, SNAP["ts"])
         events = PUSH_EVENTS[:]; PUSH_EVENTS.clear()
     if events:
         threading.Thread(target=dispatch_push, args=(events,), daemon=True).start()
@@ -578,6 +798,9 @@ def _poll_and_publish(h):
             shaped.append(shape_agent(h, a, ws))
     with LOCK:
         entry["last_ok"] = (STATE["hosts"].get(h["id"]) or {}).get("last_ok")
+        was = ((HOST_SNAP.get(h["id"]) or {}).get("entry") or {}).get("status")
+        if was in ("ok", "down") and was != entry["status"]:   # seen to change: the first look at a host is not news
+            log_event("host_down" if entry["status"] == "down" else "host_up", h["id"], label=h["id"], why=(entry["error"] or "")[:120] or None)
         HOST_SNAP[h["id"]] = {"entry": entry, "agents": shaped}
     _publish()
 
@@ -621,6 +844,7 @@ def shape_agent(host, a, ws):
         "workspace": ws.get(a.get("workspace_id")) or a.get("workspace_id"),
         "wlabel": ws.get(a.get("workspace_id")) or "",   # the name Fred gave the herdr workspace: what the phone calls the session
         "session": sess[:8], "focused": bool(a.get("focused")), "ask": a.get("_ask"),
+        "active_at": a.get("_active"),   # a working local Claude session: when it last wrote anything (None: not known)
     }
 
 
@@ -657,17 +881,34 @@ def build_queue():
         agents = [dict(a) for a in SNAP["agents"]]
         hosts = [dict(h) for h in SNAP["hosts"]]
         ts, polls = SNAP["ts"], SNAP["polls"]
+        risk_by = {}
+        for r in (watch_risks() if WATCH_ON else []):   # newest first: the first one seen for a session is its latest
+            ag = SID_AGENT.get(r.get("sid"))
+            if ag and now - (r.get("t") or 0) <= 3600:
+                risk_by.setdefault((ag["host"], ag["pane"]), {"level": r.get("level"), "what": r.get("what"), "t": r.get("t")})
         for a in agents:
             if a["status"] in ("blocked", "done"):
                 s = STATE["seen"].get(f"{a['host']}|{a['pane']}|{a['seq']}|{a['status']}")
                 if s:
                     a.update(since=s["t"], exact=s["exact"], basis=s["basis"], for_s=max(0, int(now - s["t"])))
+            elif a["status"] == "working":
+                w = WORKING.get(f"{a['host']}|{a['pane']}|{a['seq']}")
+                if w and w["exact"]:
+                    a["work_s"] = max(0, int(now - w["t"]))
+                if a.get("active_at"):
+                    a["quiet_s"] = max(0, int(now - max(a["active_at"], w["t"] if w and w["exact"] else a["active_at"])))
+            if (a["host"], a["pane"]) in risk_by:
+                a["risk"] = risk_by[(a["host"], a["pane"])]
+            a.pop("active_at", None)
+        fleet = {"working": sum(1 for a in agents if a["status"] == "working"), "blocked": sum(1 for a in agents if a["status"] == "blocked"),
+                 "done": sum(1 for a in agents if a["status"] == "done"), "stopped_at": FLEET["stopped_at"] if FLEET["had_work"] else None}
     order = {"blocked": 0, "done": 1, "working": 2, "idle": 3}
     # Longest blocked first. Cross-host order needs wall-clock; within a host the seq breaks ties.
     agents.sort(key=lambda a: (order.get(a["status"], 4), a.get("since", 0), a.get("seq") or 0,
                                a["host"], a["project"]))
     return {"now": now, "age_s": int(now - ts) if ts else None, "polls": polls, "hosts": hosts,
-            "agents": agents, "writes": not READONLY, "viewer": None, "poll_s": POLL_S, "build": shell_build(), "server_build": BOOT_BUILD}
+            "agents": agents, "writes": not READONLY, "viewer": None, "poll_s": POLL_S, "build": shell_build(), "server_build": BOOT_BUILD,
+            "fleet": fleet, "quiet_min": int(QUIET_S // 60), "watch": WATCH_ON}
 
 
 # --------------------------------------------------------------------------------------------
@@ -739,6 +980,20 @@ def parse_menu(text):
     return out
 
 
+def pane_view(host, pane, n):
+    """What an open session shows: the last n lines, the question on screen when it is blocked, and the agent's state.
+    One read of the pane, not two: the menu needs the last 80 lines, the phone asked for n, and on another machine every
+    read is an ssh."""
+    a = get_agent(host, pane)
+    blocked = a["agent_status"] == "blocked"
+    got = read_tail(host, pane, max(n, 80) if blocked else n)
+    text, queued = clean_tail("\n".join(got.split("\n")[-n:]))
+    menu = parse_menu(got) if blocked else None
+    if menu:
+        menu["risk"] = dialog_risk(got, menu)
+    return {"text": text, "queued": queued, "lines": n, "menu": menu, "agent": shape_agent(host, a, {}), "at": time.time()}
+
+
 def human_keys(keys):
     sym = {"up": "↑", "down": "↓", "left": "←", "right": "→", "enter": "⏎", "esc": "Esc",
            "tab": "Tab", "shift+tab": "⇧Tab", "space": "Space", "backspace": "⌫"}
@@ -802,6 +1057,7 @@ def build_plan(body):
     a = get_agent(host, pane)
     status = a["agent_status"]
     steps, lines, approves = [], [], False
+    risky = None        # a permission dialog whose command the watch would flag
     bare_text = False   # words typed at a blocked pane that was not a numbered menu
     keys_menu, menu_fp = False, None
     queued_line = False
@@ -871,7 +1127,7 @@ def build_plan(body):
         if not isinstance(keys, list) or not 1 <= len(keys) <= 8:
             raise HerdrError("bad_keys", "1 to 8 keys")
         for k in keys:
-            if not (k in KEY_NAMED or (isinstance(k, str) and KEY_CHAR.match(k))):
+            if not (isinstance(k, str) and (k in KEY_NAMED or KEY_CHAR.match(k))):   # str first: a list or a dict cannot even be looked up in a set
                 raise HerdrError("bad_keys", f"key {k!r} is not allowed from the phone")
         if status == "working" and keys != ["esc"]:
             raise HerdrError("bad_keys", "the agent is working: the only key allowed is Esc (interrupt)")
@@ -909,6 +1165,9 @@ def build_plan(body):
             steps = [{"op": "keys", "keys": keys}]
             approves = opt["approves"]
             lines = [("Picks", f"{n}. {opt['label']}"), ("By pressing", human_keys(keys))]
+            risky = dialog_risk(read_tail(host, pane, 80), menu) if approves else None
+            if risky:   # what it is about to be allowed to do, in plain words, before the tap
+                lines.append(("Careful", f"what this allows looks like: {risky['what']}"))
         if menu.get("question"):   # which question this answers: a form asks several, and words can land on a different one than you meant
             lines.insert(0, ("Answers", menu["question"]))
     elif kind == "multi":
@@ -999,6 +1258,7 @@ def build_plan(body):
         PLANS[plan["nonce"]] = plan
     return {
         "nonce": plan["nonce"], "kind": kind, "expires_s": NONCE_TTL_S, "approves": approves, "from_box": bool(body.get("from_box")),
+        "risk": risky if kind == "choose" else None,
         "target": {"host": host["id"], "pane": pane,
                    "title": os.path.basename((a.get("cwd") or "").rstrip("/")) or pane, "project": "", "status": status},
         "lines": [{"k": k, "v": v} for k, v in lines],
@@ -1661,6 +1921,13 @@ def hosts_view():
         saved.append({"id": m.get("label"), "profile": m.get("id"), "kind": "remote", "enabled": bool(m.get("enabled")),
                       "target": m.get("target"), "status": st.get("status"), "error": st.get("error"), "last_ok": st.get("last_ok"),
                       "counts": st.get("counts", {})})
+    for name, _route in local_sessions()[0]:   # the other running herdr sessions on this machine: listed, never switched (they are not saved machines)
+        hid = f"{LOCAL}/{name}"
+        st = status.get(hid) or {}
+        if all(x["id"] != hid for x in saved):
+            saved.insert(1 + sum(1 for x in saved if x["kind"] == "session"),
+                         {"id": hid, "kind": "session", "enabled": True, "target": None, "session": name, "status": st.get("status"),
+                          "error": st.get("error"), "last_ok": st.get("last_ok"), "counts": st.get("counts", {})})
     pk = hub_pubkey()
     # shlex.quote: a key comment is free text ("fred's laptop", or a quote that would close the
     # single quotes). The Copy key button pastes this line onto another machine.
@@ -1752,7 +2019,9 @@ def recent_commands(limit=6, scan=6000):
     for line in reversed(lines):
         try:
             disp = json.loads(line).get("display") or ""
-        except ValueError:
+        except (ValueError, AttributeError):   # not JSON, or JSON that is not an object
+            continue
+        if not isinstance(disp, str):
             continue
         # "/name" then whitespace or end: a path like /home/pi/x never matches
         m = re.match(r"^/([A-Za-z][\w:.-]*)(?:\s|$)", disp)
@@ -1883,7 +2152,8 @@ def codex_last_active(cwd):
                     c = ix["cwd_of"][path]
                     if c:
                         m[c] = max(m.get(c, 0), mt)
-                except (OSError, ValueError):
+                except (OSError, ValueError, AttributeError, TypeError):   # a first line that is JSON but not the object Codex writes
+                    ix["cwd_of"].setdefault(path, "")
                     continue
         ix["map"], ix["t"] = m, time.time()
     return ix["map"].get(cwd)
@@ -1985,7 +2255,7 @@ def plan_start(body):
     try:
         label = next((w.get("label") for w in run_herdr(host["machine"], ["workspace", "list"], timeout=8)["result"]["workspaces"]
                       if w.get("workspace_id") == info.get("workspace_id")), None)
-    except (HerdrError, KeyError, TypeError):
+    except (HerdrError, KeyError, TypeError, AttributeError):
         label = None
     label = label or os.path.basename(cwd.rstrip("/")) or pane
     if agent == "claude":
@@ -2085,7 +2355,7 @@ def plan_new_project(body):
     try:
         if any(w.get("label") == name for w in run_herdr(host["machine"], ["workspace", "list"], timeout=8)["result"]["workspaces"]):
             lines.append(("Heads up", "a herdr project with this name already exists. A second one will be made."))
-    except (HerdrError, KeyError, TypeError):
+    except (HerdrError, KeyError, TypeError, AttributeError):
         pass
     if msg:
         lines.append(("First message", msg))
@@ -2217,7 +2487,7 @@ def plan_open_folder(body):
         shown = os.path.expanduser(PROJECTS_DIR).rstrip("/")
         if any(c == p or c.startswith(p + os.sep) for c in _herdr_dirs(host) for p in (os.path.realpath(real), os.path.join(shown, d))):
             lines.append(("Heads up", "herdr already has a terminal in this folder. A second project will be made."))
-    except (HerdrError, KeyError, TypeError):
+    except (HerdrError, KeyError, TypeError, AttributeError):
         pass
     lines.append(("Then types", cmd))
     ex = alias_expansion(NEW_CMD) if agent == "claude" else None
@@ -2317,7 +2587,10 @@ PUSH_MIN_GAP_S = 20
 PUSH = {}            # device id -> {"sub": {...}, "prefs": {"blocked": bool, "done": bool}, "t": epoch}
 PUSH_LAST = {}       # device id -> when a push last went out (rate limit)
 PUSH_STATUS = {}     # device id -> {at, code, why}: what the push service said to the last push, shown on the Keys screen
-PUSH_EVENTS = []     # "blocked" / "done" transitions seen by the poller since the last dispatch
+PUSH_EVENTS = []     # what the poller saw since the last dispatch: "blocked", "done", "quiet", "stopped", "risk"
+# What a phone can ask to be told about. The first two are the original ones; the rest are the watch (off until asked for,
+# except the fleet stopping, which is the one moment the whole thing is waiting on you).
+PUSH_PREF_DEFAULTS = {"blocked": True, "done": False, "quiet": False, "stopped": False, "risk": False}
 _vapid = {}
 
 
@@ -2340,7 +2613,16 @@ def vapid_keys():
                 with open(state_path("vapid.json")) as f:
                     j = json.load(f)
                 d = int(j["d"], 16)
-            except (OSError, ValueError, KeyError):
+                if not 1 <= d < _N:
+                    raise ValueError("not a P-256 private key")
+            except FileNotFoundError:
+                d = None
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                # A new key silently ends every phone's notifications (a subscription is bound to the key it was made with),
+                # so say it: the phones show "Turn on notifications" again and nobody has to guess why.
+                print(f"shepr: the push key in vapid.json could not be read ({e!r}); a new one is made, and every phone must turn notifications on again", file=sys.stderr, flush=True)
+                d = None
+            if d is None:
                 d = secrets.randbelow(_N - 1) + 1
                 os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
                 fd = os.open(state_path("vapid.json"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -2456,7 +2738,8 @@ def push_config(dev_id):
     _d, pub = vapid_keys()
     with LOCK:
         ent = PUSH.get(dev_id)
-    return {"key": b64u(pub), "subscribed": bool(ent), "prefs": (ent or {}).get("prefs") or {"blocked": True, "done": False},
+    prefs = dict(PUSH_PREF_DEFAULTS, **((ent or {}).get("prefs") if isinstance((ent or {}).get("prefs"), dict) else {}))
+    return {"key": b64u(pub), "subscribed": bool(ent), "prefs": {k: bool(prefs[k]) for k in PUSH_PREF_DEFAULTS},
             "last": PUSH_STATUS.get(dev_id)}
 
 
@@ -2468,8 +2751,9 @@ def push_subscribe(dev_id, body):
     clean = {"endpoint": sub["endpoint"], "keys": {k: str(keys.get(k, ""))[:200] for k in ("p256dh", "auth")}}
     prefs = body.get("prefs") if isinstance(body.get("prefs"), dict) else {}
     with LOCK:
-        old = (PUSH.get(dev_id) or {}).get("prefs") or {"blocked": True, "done": False}
-        PUSH[dev_id] = {"sub": clean, "t": int(time.time()), "prefs": {"blocked": bool(prefs.get("blocked", old["blocked"])), "done": bool(prefs.get("done", old["done"]))}}
+        was = (PUSH.get(dev_id) or {}).get("prefs")
+        old = dict(PUSH_PREF_DEFAULTS, **(was if isinstance(was, dict) else {}))
+        PUSH[dev_id] = {"sub": clean, "t": int(time.time()), "prefs": {k: bool(prefs.get(k, old[k])) for k in PUSH_PREF_DEFAULTS}}
         save_push()
     return push_config(dev_id)
 
@@ -2479,7 +2763,8 @@ def push_set_prefs(dev_id, body):
         ent = PUSH.get(dev_id)
         if not ent:
             raise HerdrError("not_subscribed", "this phone is not subscribed to notifications")
-        ent["prefs"] = {"blocked": bool(body.get("blocked", ent["prefs"]["blocked"])), "done": bool(body.get("done", ent["prefs"]["done"]))}
+        old = dict(PUSH_PREF_DEFAULTS, **(ent.get("prefs") if isinstance(ent.get("prefs"), dict) else {}))   # a subscription saved by an older build has fewer kinds
+        ent["prefs"] = {k: bool(body.get(k, old[k])) for k in PUSH_PREF_DEFAULTS}
         save_push()
     return push_config(dev_id)
 
@@ -2605,6 +2890,254 @@ def ledger_view(now=None, agents=None):
 
 
 # --------------------------------------------------------------------------------------------
+# the watch, as the phone sees it: activity (what happened), burn (who used the plan), changes (what a project's git says)
+# --------------------------------------------------------------------------------------------
+ACTIVITY_MAX = 300
+SENT_KINDS = {"text", "choose", "multi", "keys", "sendnow", "model", "effort", "wake", "start", "new_project", "open_folder"}
+
+
+def _sent_text(rec):
+    """What a send was, in a few words, from its audit record."""
+    steps = rec.get("steps") if isinstance(rec.get("steps"), list) else []
+    words = next((st.get("text") for st in steps if isinstance(st, dict) and isinstance(st.get("text"), str)), None)
+    if words:
+        return one_line(words, 120)
+    keys = [k for st in steps if isinstance(st, dict) and isinstance(st.get("keys"), list) for k in st["keys"] if isinstance(k, str)]
+    if keys:
+        return "keys " + human_keys(keys[:12])
+    cmd = next((st.get("cmd") for st in steps if isinstance(st, dict) and isinstance(st.get("cmd"), str)), None)
+    return one_line(cmd, 120) if cmd else ""
+
+
+def activity_view(since=None, limit=ACTIVITY_MAX, now=None):
+    """What the fleet did, newest first: questions asked and answered, sessions finishing, agents going quiet, everything
+    stopping, hosts dropping out, risky commands, and what was sent from a phone. `summary` counts each kind since `since`,
+    which is what the "since you last looked" card shows."""
+    now = now if now is not None else time.time()
+    floor = now - EVENT_KEEP_DAYS * 86400
+    try:
+        since = max(floor, float(since)) if since not in (None, "") else now - 86400
+    except (TypeError, ValueError):
+        raise HerdrError("bad_request", "since must be a time in seconds")
+    limit = max(1, min(ACTIVITY_MAX, int(limit)))
+    with LOCK:
+        names = {(a["host"], a["pane"]): (a.get("wlabel") or a.get("project") or a["pane"]) for a in SNAP["agents"]}
+    items = read_events(since)
+    try:
+        with open(state_path("sends.jsonl"), "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - (1 << 20)))
+            raw = f.read().decode("utf-8", "replace").split("\n")[(1 if size > (1 << 20) else 0):]
+    except OSError:
+        raw = []
+    for line in raw:
+        try:
+            r = json.loads(line)
+            if not isinstance(r, dict) or r.get("kind") not in SENT_KINDS or float(r["t"]) <= since:
+                continue
+        except (ValueError, KeyError, TypeError):
+            continue
+        items.append({"t": float(r["t"]), "ev": "sent" if r.get("ok") else "send_failed", "host": r.get("host"), "pane": r.get("pane"),
+                      "label": names.get((r.get("host"), r.get("pane"))) or r.get("pane") or "", "kind": r.get("kind"), "text": _sent_text(r)})
+    items.sort(key=lambda e: e["t"])
+    summary = {}
+    for e in items:
+        summary[e["ev"]] = summary.get(e["ev"], 0) + 1
+        if e["ev"] == "risk" and e.get("level") == "danger":   # "risk" is every risky command; "risk_danger" is how many of them were red
+            summary["risk_danger"] = summary.get("risk_danger", 0) + 1
+    out = []
+    for e in reversed(items[-limit:]):
+        row = {"t": e["t"], "ev": e["ev"], "host": e.get("host"), "pane": e.get("pane"), "label": e.get("label") or "",
+               "open": bool(e.get("host") and e.get("pane") and (e.get("host"), e.get("pane")) in names)}
+        for k in ("q", "wait", "mins", "level", "what", "cmd", "blocked", "done", "kind", "text", "why", "helper"):
+            if e.get(k) is not None:
+                row[k] = e[k]
+        out.append(row)
+    return {"since": since, "now": now, "items": out, "summary": summary, "total": len(items), "watch": WATCH_ON}
+
+
+BURN_SPANS = {"1h": 3600, "5h": 5 * 3600, "24h": 24 * 3600}
+
+
+def burn_view(span="5h"):
+    """Who has been using the plan: each session's share of this host's token use over the span, by Claude Code's own counts."""
+    if span not in BURN_SPANS:
+        raise HerdrError("bad_request", "span must be 1h, 5h or 24h")
+    if not WATCH_ON:
+        return {"available": False, "reason": "The watch is switched off on this host (SHEPR_WATCH=0).", "rows": [], "span": span}
+    if WATCH_FIXTURE:
+        b = dict(_watch_fixture().get("burn") or {}, ready=True)
+    else:
+        b = WATCH.burn(BURN_SPANS[span])
+    rows = []
+    with LOCK:
+        for r in b.get("rows") or []:
+            ag = SID_AGENT.get(r.get("sid")) or {}
+            row = {k: r.get(k) for k in ("share", "out", "ctx", "think", "replies", "model", "models", "helpers", "last")}
+            row.update(label=ag.get("label") or os.path.basename(str(r.get("cwd") or "").rstrip("/")) or str(r.get("sid") or "")[:8],
+                       title=one_line(str(r.get("title") or ""), 80), host=ag.get("host"), pane=ag.get("pane"), status=ag.get("status"),
+                       open=bool(ag), sid=str(r.get("sid") or "")[:8])
+            rows.append(row)
+    out = {k: b.get(k) for k in ("others", "sessions", "replies", "out", "ctx", "series", "models", "now")}
+    out.update(available=True, ready=bool(b.get("ready")), span=span, span_s=BURN_SPANS[span], rows=rows, host=LOCAL,
+               note="Shares are estimated from Claude Code's own token counts on this host. Sessions on other machines are not counted.")
+    return out
+
+
+# ---- changes: what git says about the project a session runs in. Read only: status, log and diff, nothing else, with the
+# hooks git could run on a read switched off. Only for a session on this machine (the files are here).
+CHANGES_FILES = 200
+DIFF_MAX = 160_000
+GIT_ENV = {"GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "PAGER": "cat", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1"}
+
+
+def _git(cwd, args, timeout=8, cap=600_000):
+    """One read-only git command in `cwd`. (code, stdout text). GIT_OPTIONAL_LOCKS=0 keeps it from touching the index, so it can
+    never collide with the agent's own git; fsmonitor and external diff programs are switched off, so reading runs nobody's code."""
+    cmd = ["git", "-C", cwd, "-c", "core.fsmonitor=false", "-c", "core.quotepath=false", "-c", "color.ui=false", "--no-pager"] + list(args)
+    try:
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout, env=dict(os.environ, **GIT_ENV))
+    except FileNotFoundError:
+        raise HerdrError("no_git", "git is not installed on this host")
+    except subprocess.TimeoutExpired:
+        raise HerdrError("timeout", f"git took longer than {timeout}s in that folder")
+    return r.returncode, r.stdout[:cap].decode("utf-8", "replace")
+
+
+def _agent_dir(host, pane):
+    if host["kind"] != "local":
+        raise HerdrError("local_only", "changes can only be read for a session on the machine Shepr runs on: the files are there")
+    if not PANE_RE.match(pane):
+        raise HerdrError("bad_pane", "not a pane id")
+    a = get_agent(host, pane)
+    cwd = a.get("cwd") or a.get("foreground_cwd") or ""
+    if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
+        raise HerdrError("no_folder", "that session's folder is not on this machine")
+    return cwd
+
+
+def _status_rows(cwd):
+    """(branch line, rows) from `git status --porcelain`. A row is {"path", "x", "y"} with the two status letters git prints."""
+    code, out = _git(cwd, ["status", "--porcelain=v1", "--branch", "--untracked-files=all"])
+    if code != 0:
+        return None, []
+    head, rows = "", []
+    for line in out.split("\n"):
+        if line.startswith("## "):
+            head = line[3:]
+        elif len(line) > 3:
+            path = line[3:]
+            if " -> " in path and line[0] in "RC":
+                path = path.split(" -> ", 1)[1]
+            if len(path) > 1 and path[0] == '"' and path[-1] == '"':
+                path = path[1:-1]
+            rows.append({"path": path, "x": line[0], "y": line[1]})
+    return head, rows
+
+
+def changes_view(host, pane):
+    cwd = _agent_dir(host, pane)
+    code, top = _git(cwd, ["rev-parse", "--show-toplevel"])
+    if code != 0:
+        return {"git": False, "folder": os.path.basename(cwd.rstrip("/")) or cwd, "at": time.time()}
+    top = top.strip()
+    head, rows = _status_rows(cwd)
+    # "main...origin/main [ahead 1, behind 2]", "main", "HEAD (no branch)", "No commits yet on main"
+    h, track = head or "?", ""
+    mt = re.search(r" \[([^\]]+)\]$", h)
+    if mt:
+        track, h = mt.group(1), h[:mt.start()]
+    if h.startswith("No commits yet on "):
+        h = h[len("No commits yet on "):]
+    branch, _, upstream = h.partition("...")
+    upstream = upstream or None
+    ahead = int((re.search(r"ahead (\d+)", track) or [0, 0])[1])
+    behind = int((re.search(r"behind (\d+)", track) or [0, 0])[1])
+    stat = {}
+    code, out = _git(cwd, ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "HEAD", "--"])
+    if code != 0:   # no commit yet: compare with the empty index instead
+        code, out = _git(cwd, ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "--"])
+    for line in out.split("\n"):
+        parts = line.split("\t")
+        if len(parts) == 3:
+            path = parts[2].split(" => ")[-1].rstrip("}") if " => " in parts[2] and "{" not in parts[2] else parts[2]
+            stat[path] = (None if parts[0] == "-" else int(parts[0]), None if parts[1] == "-" else int(parts[1]))
+    files = []
+    for r in rows[:CHANGES_FILES]:
+        add, dele = stat.get(r["path"], (None, None))
+        files.append({"path": r["path"], "x": r["x"], "y": r["y"], "add": add, "del": dele, "untracked": r["x"] == "?"})
+    commits = []
+    code, out = _git(cwd, ["log", "-12", "--format=%h%x1f%ct%x1f%an%x1f%s"])
+    if code == 0:
+        for i, line in enumerate(l for l in out.split("\n") if l):
+            h, _, rest = line.partition("\x1f")
+            ct, _, rest = rest.partition("\x1f")
+            who, _, subj = rest.partition("\x1f")
+            try:
+                commits.append({"h": h[:12], "t": int(ct), "who": who[:40], "s": one_line(subj, 140), "unpushed": bool(upstream) and i < ahead})
+            except ValueError:
+                continue
+    return {"git": True, "folder": os.path.basename(top.rstrip("/")), "branch": branch, "upstream": upstream, "ahead": ahead, "behind": behind,
+            "detached": branch.startswith("HEAD"), "files": files, "more": max(0, len(rows) - CHANGES_FILES),
+            "added": sum(f["add"] or 0 for f in files), "deleted": sum(f["del"] or 0 for f in files), "commits": commits, "at": time.time()}
+
+
+def changes_diff(host, pane, path):
+    """The diff of ONE file that git itself lists as changed in that session's project. A path git does not list is refused, so
+    this can never be used to read an arbitrary file."""
+    cwd = _agent_dir(host, pane)
+    if not isinstance(path, str) or not path or len(path) > 1000 or "\x00" in path:
+        raise HerdrError("bad_request", "which file?")
+    _head, rows = _status_rows(cwd)
+    row = next((r for r in rows if r["path"] == path), None)
+    if not row:
+        raise HerdrError("not_changed", "git does not list that file as changed any more")
+    _code, top = _git(cwd, ["rev-parse", "--show-toplevel"])
+    top = top.strip()
+    if row["x"] == "?":   # untracked: there is nothing to compare with, so show the file itself (text only, from inside the project)
+        full = os.path.realpath(os.path.join(top, path))
+        if not (full == os.path.realpath(top) or full.startswith(os.path.realpath(top) + os.sep)) or not os.path.isfile(full):
+            raise HerdrError("not_changed", "that file is not a plain file inside the project")
+        with open(full, "rb") as f:
+            data = f.read(DIFF_MAX + 1)
+        if b"\x00" in data[:8000]:
+            return {"path": path, "new": True, "binary": True, "text": "", "truncated": False}
+        return {"path": path, "new": True, "binary": False, "truncated": len(data) > DIFF_MAX,
+                "text": "\n".join("+" + l for l in clean_text(data[:DIFF_MAX].decode("utf-8", "replace")).split("\n"))}
+    code, out = _git(top, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U3", "HEAD", "--", path], cap=DIFF_MAX + 1)
+    if code != 0:
+        code, out = _git(top, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U3", "--", path], cap=DIFF_MAX + 1)
+    body = out.split("\n")
+    start = next((i for i, l in enumerate(body) if l.startswith("@@")), None)
+    binary = any(l.startswith("Binary files ") for l in body[:8])
+    text = "" if binary or start is None else clean_text("\n".join(body[start:]))
+    return {"path": path, "new": False, "binary": binary, "truncated": len(out) > DIFF_MAX, "text": text[:DIFF_MAX]}
+
+
+def dialog_risk(text, menu):
+    """A permission dialog shows the command it wants to run above its options. When an option approves, look at those lines the
+    way the watch looks at commands that already ran, and say what is risky about them: {"level", "what"} or None."""
+    if not menu or not any(o.get("approves") for o in menu.get("options") or []):
+        return None
+    lines = text.split("\n")
+    first = next((i for i in range(len(lines) - 1, -1, -1) if OPT_RE.match(lines[i]) and OPT_RE.match(lines[i]).group(2) == "1"), None)
+    if first is None:
+        return None
+    # Only the dialog itself is judged: up to the rule that opens it, or the dozen lines above the options when it has none.
+    # What the agent SAID further up the screen ("I will not force push") is talk, not what is about to run.
+    rule = set("─━═╭╮╰╯-_ ")
+    top = next((i for i in range(first - 1, max(-1, first - 31), -1) if len(lines[i].strip()) >= 8 and set(lines[i].strip()) <= rule), None)
+    top = top + 1 if top is not None else max(0, first - 12)
+    best = None
+    for l in lines[top:first]:
+        hit = shepr_watch.risk_scan(l.strip().strip("│|").strip())
+        if hit and (best is None or (hit[0] == "danger" and best[0] != "danger")):
+            best = hit
+    return {"level": best[0], "what": best[1]} if best else None
+
+
+# --------------------------------------------------------------------------------------------
 # photos and files from the phone: stored privately on THIS host, the path comes back, and the person sends it to an agent
 # through the normal confirm sheet. Nothing is sent to an agent by uploading.
 # --------------------------------------------------------------------------------------------
@@ -2699,20 +3232,92 @@ CSP = ("default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; 
 PUBLIC_API = {"/api/hello", "/api/pair"}
 
 
-def learn_tailnet():
-    """Who owns this node and what is its name. Used to refuse other tailnet users and DNS rebinding."""
+def learn_tailnet(quiet=False):
+    """Who owns this node and what is its name. Used to refuse other tailnet users and DNS rebinding. True when both are known."""
     try:
         d = json.loads(subprocess.run(["tailscale", "status", "--json"], stdin=subprocess.DEVNULL,
                                       capture_output=True, text=True, timeout=6).stdout)
         me = d["Self"]
-        OWNER["dns"] = me["DNSName"].rstrip(".").lower()
-        OWNER["names"].add(OWNER["dns"])
-        OWNER["login"] = d["User"][str(me["UserID"])]["LoginName"].lower()
+        dns = me["DNSName"].rstrip(".").lower()
+        login = d["User"][str(me["UserID"])]["LoginName"].lower()
+        if not dns or not login:
+            raise ValueError("this node has no tailnet name yet")
+        OWNER["dns"] = dns
+        OWNER["login"] = OWNER["login"] or login   # a login already known (SHEPR_OWNER, an earlier answer) is never replaced
+        OWNER["names"].add(dns)
     except Exception as e:
-        print(f"shepr: tailscale identity unavailable ({e!r}); tailnet requests will be refused", file=sys.stderr)
+        if not quiet:
+            print(f"shepr: tailscale identity unavailable ({e!r}); tailnet requests are refused until it is known (it is asked again every few seconds)", file=sys.stderr, flush=True)
     OWNER["login"] = (os.environ.get("SHEPR_OWNER") or OWNER["login"] or "").lower() or None
     for n in filter(None, os.environ.get("SHEPR_ALLOW_HOSTS", "").lower().split(",")):
         OWNER["names"].add(n.strip())
+    return tailnet_known()
+
+
+def tailnet_known():
+    return bool(OWNER.get("dns") and OWNER.get("login"))
+
+
+# The identity used to be asked for ONCE, at start. A server that started before Tailscale was connected (a boot race, a slow
+# login, tailscaled restarted) then refused every phone with 421 for as long as it ran, and `shepr pair` printed a QR for
+# 127.0.0.1. Now a quiet background loop asks again until it is known (never from inside a request: a hung `tailscale` must
+# not hold a phone's request for seconds).
+_tailnet = {"tried": 0.0, "port": None}
+TAILNET_RETRY_S = 5.0
+
+
+def relearn_tailnet():
+    """Ask Tailscale again, at most once per TAILNET_RETRY_S. True when the identity is known afterwards."""
+    with LOCK:
+        if tailnet_known():
+            return True
+        now = time.time()
+        if now - _tailnet["tried"] < TAILNET_RETRY_S:
+            return False
+        _tailnet["tried"] = now
+    if learn_tailnet(quiet=True):
+        print(f"shepr: tailscale identity learned: {OWNER['dns']} (owner={OWNER['login']})", file=sys.stderr, flush=True)
+        if _tailnet["port"]:
+            try:
+                write_server_json(_tailnet["port"])   # `shepr pair` reads the URL from here: it must be the tailnet name now
+            except OSError:
+                pass
+        return True
+    return False
+
+
+def tailnet_retry_loop():
+    wait, tries = TAILNET_RETRY_S, 0
+    while not tailnet_known():
+        time.sleep(wait)
+        relearn_tailnet()
+        tries += 1
+        if tries > 12:   # a minute of quick tries, then less and less often: a machine with Tailscale switched off is not hammered
+            wait = min(300.0, wait * 1.5)
+
+
+def write_server_json(port):
+    """What `shepr pair` and `shepr status` read to find this server. Written only once the port is really ours."""
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    tmp = state_path("server.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump({"pid": os.getpid(), "port": port, "url": public_url(port), "started": int(time.time())}, f)
+    os.replace(tmp, state_path("server.json"))
+
+
+def header_login(v):
+    """The login `tailscale serve` put in Tailscale-User-Login. A name that is not plain ASCII arrives RFC 2047 encoded
+    ("=?utf-8?q?...?="), and compared as it stands the owner of such a login was refused by their own server."""
+    v = v or ""
+    if v.startswith("=?"):
+        try:
+            v = str(email.header.make_header(email.header.decode_header(v)))
+        except Exception:
+            pass
+    return v.strip().lower()
+
+
+ALLOW_PROXY = os.environ.get("SHEPR_ALLOW_PROXY") == "1"   # your own reverse proxy in front, which decides who may connect
 
 
 # Whole-request deadlines. A socket timeout alone is not enough: it restarts on every receive, so a caller who sends one
@@ -2779,7 +3384,7 @@ class Handler(SimpleHTTPRequestHandler):
         return ok
 
     def log_message(self, fmt, *args):
-        if args and str(args[1]) not in ("200", "304"):
+        if len(args) < 2 or str(args[1]) not in ("200", "304"):   # a one-argument message (a timeout) has no status to look at
             super().log_message(fmt, *args)
 
     def end_headers(self):
@@ -2808,12 +3413,19 @@ class Handler(SimpleHTTPRequestHandler):
         raw = self.headers.get("Host") or ""
         host = "[::1]" if raw.startswith("[") else raw.rsplit(":", 1)[0].lower()
         if host not in OWNER["names"]:
-            self.json_out(421, {"error": "bad_host", "message": "unexpected Host header"}); return None
+            self.json_out(421, {"error": "bad_host", "message": "unexpected Host header" if tailnet_known() else
+                                "this host does not know its tailnet name yet (is Tailscale connected on it?)"}); return None
         if self.headers.get("Tailscale-Funnel-Request"):
             self.json_out(403, {"error": "funnel", "message": "public funnel traffic is refused"}); return None
-        login = (self.headers.get("Tailscale-User-Login") or "").lower()
+        login = header_login(self.headers.get("Tailscale-User-Login"))
         if login and login != OWNER["login"]:
             self.json_out(403, {"error": "not_owner", "message": "this app answers only to the node's owner"}); return None
+        # `tailscale serve` names the user of every request it forwards, except for a node that HAS no user: a tagged
+        # device. Such a request arrives with the proxy's X-Forwarded headers and no login, and used to be taken for a
+        # process on this machine. Only a direct loopback caller has neither.
+        if not login and not ALLOW_PROXY and (self.headers.get("X-Forwarded-For") or self.headers.get("X-Forwarded-Host")):
+            self.json_out(403, {"error": "not_owner", "message": "this request came through a proxy with no tailnet user on it "
+                                "(a tagged device, or a reverse proxy of your own: see SHEPR_ALLOW_PROXY)"}); return None
         if post:
             origin = self.headers.get("Origin")
             if origin and urlsplit(origin).netloc.lower() != raw.lower():
@@ -2869,18 +3481,18 @@ class Handler(SimpleHTTPRequestHandler):
                     poll_all()
                 out = build_queue()
                 out["viewer"], out["host"] = vname, LOCAL
+                last = PUSH_STATUS.get(viewer)
+                if last and time.time() * 1000 - last["at"] < 120_000:   # the notification worker asks right after a push: tell it what the push was for
+                    out["pushed"] = {"why": last["why"], "at": last["at"]}
+                with LOCK:
+                    out["push_on"] = viewer in PUSH
                 return self.json_out(200, out)
             if not post and u.path == "/api/pane":
                 host = need_host(q.get("host", ""))
                 pane = q.get("pane", "")
                 if not PANE_RE.match(pane):
                     raise HerdrError("bad_pane", "not a pane id")
-                n = max(5, min(200, int(q.get("lines", "40"))))
-                a = get_agent(host, pane)
-                text, queued = clean_tail(read_tail(host, pane, n))
-                return self.json_out(200, {"text": text, "queued": queued, "lines": n, "menu": parse_menu(read_tail(host, pane, 80))
-                                           if a["agent_status"] == "blocked" else None,
-                                           "agent": shape_agent(host, a, {}), "at": time.time()})
+                return self.json_out(200, pane_view(host, pane, max(5, min(200, int(q.get("lines", "40"))))))
             if not post and u.path == "/api/history":
                 host = need_host(q.get("host", ""))
                 pane = q.get("pane", "")
@@ -2939,6 +3551,14 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json_out(200, {"ok": bool(res) and all(r["code"] == 200 for r in res), "results": res})
             if not post and u.path == "/api/budget":
                 return self.json_out(200, budget_view())
+            if not post and u.path == "/api/activity":
+                return self.json_out(200, activity_view(q.get("since"), int(q.get("limit", ACTIVITY_MAX))))
+            if not post and u.path == "/api/burn":
+                return self.json_out(200, burn_view(q.get("span", "5h")))
+            if not post and u.path == "/api/changes":
+                return self.json_out(200, changes_view(need_host(q.get("host", "")), q.get("pane", "")))
+            if not post and u.path == "/api/changes/diff":
+                return self.json_out(200, changes_diff(need_host(q.get("host", "")), q.get("pane", ""), q.get("path", "")))
             if not post and u.path == "/api/ledger":
                 return self.json_out(200, ledger_view(agents=build_queue()["agents"]))
             if post and u.path == "/api/upload":
@@ -2954,8 +3574,23 @@ class Handler(SimpleHTTPRequestHandler):
             return self.json_out(404, {"error": "not_found", "message": u.path})
         except HerdrError as e:
             return self.json_out(http_status(e.code), {"error": e.code, "message": e.message})
-        except (ValueError, KeyError) as e:
-            return self.json_out(400, {"error": "bad_request", "message": str(e)})
+        except (BrokenPipeError, ConnectionResetError):
+            raise   # the phone went away mid-answer: there is no one to tell
+        except Exception as e:
+            # A commit that fails half way may have typed something: say so, whatever the failure was. Everything else that is
+            # bad input stays a 400. Anything unforeseen is answered as a 500: a dropped connection reads as "offline" on the
+            # phone, which sent people to check Tailscale for what was a bug on the host.
+            committing = post and u.path == "/api/send/commit"
+            if isinstance(e, RecursionError):   # a body nested thousands deep: bad input, and not worth a traceback
+                return self.json_out(400, {"error": "bad_request", "message": "that body is nested too deeply"})
+            if isinstance(e, (ValueError, KeyError)) and not committing:
+                return self.json_out(400, {"error": "bad_request", "message": str(e)})
+            print(f"shepr: internal error on {'POST' if post else 'GET'} {u.path}: {e!r}", file=sys.stderr, flush=True)
+            traceback.print_exc(file=sys.stderr)
+            msg = "Shepr hit an internal error on the host (the details are in its journal)."
+            if committing:
+                msg += " A failed write may still have landed: read the pane before trying again."
+            return self.json_out(500, {"error": "internal", "message": msg})
 
     def do_GET(self):
         if urlsplit(self.path).path.startswith("/api/"):
@@ -3093,6 +3728,57 @@ def tailscale_problem():
     if state == "Running" or not isinstance(state, str):
         return None
     return TAILSCALE_STATES.get(state) or (f"Tailscale is not connected (state {state})", "tailscale up")
+
+
+# Lines in a unit's journal that say nothing about WHY it is failing: systemd's own bookkeeping, sudo's, and this server's routine news.
+UNIT_NOISE = re.compile(r"^(?:Start(?:ed|ing) |Stopp(?:ed|ing) |Consumed |pam_unix|\S+ : .*COMMAND=|.*Scheduled restart job|.*Failed with result|"
+                        r".*Control process exited|.*Main process exited|.*Failed to start |.*: Start request repeated|"
+                        r"shepr: (?:serving|hello|send|tailnet scan|push|paired|tailscale identity learned) |\d+\.\d+\.\d+\.\d+ - - \[)")
+
+
+def unit_trouble(names=None):
+    """Why a unit that should be running is not, from systemd's own record: {"unit", "state", "restarts", "last", "fix"}, or None
+    when no unit is failing (one that is simply stopped is not failing) or systemd cannot be asked. On 2026-11-01 a unit failed
+    33,662 times in 49 hours on one line of `tailscale serve` output, and `shepr status` said only "not running. Start it"."""
+    for n in (unit_names() if names is None else names):
+        try:
+            r = subprocess.run(["systemctl", "--user", "show", n + ".service", "-p", "ActiveState,SubState,Result,NRestarts"],
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        kv = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+        active, sub, result = kv.get("ActiveState", ""), kv.get("SubState", ""), kv.get("Result", "")
+        if r.returncode != 0 or not active or (active == "active" and sub == "running"):
+            continue
+        if active == "inactive" and result in ("", "success"):
+            continue   # stopped by a person, or never started: "start it" is the right thing to say
+        try:
+            j = subprocess.run(["journalctl", "--user", "-u", n + ".service", "-n", "80", "--no-pager", "-o", "cat"],
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=8)
+            lines = [l.strip() for l in j.stdout.splitlines() if l.strip() and not UNIT_NOISE.match(l.strip())]
+        except (OSError, subprocess.TimeoutExpired):
+            lines = []
+        last = CTRL_RE.sub("", lines[-1])[:220] if lines else ""
+        fix = None
+        if "must be root, or be an operator" in last or "access denied" in last.lower():
+            fix = "sudo tailscale set --operator=$USER"   # tailscale then lets this user configure it without sudo
+        elif "Address already in use" in last:
+            fix = "another program has the port: find it with `ss -ltnp`, or give Shepr another port"
+        try:
+            restarts = int(kv.get("NRestarts") or 0)
+        except ValueError:
+            restarts = 0
+        return {"unit": n, "state": f"{active}/{sub}" if sub else active, "restarts": restarts, "last": last, "fix": fix}
+    return None
+
+
+def unit_trouble_text(t):
+    out = f"the unit {t['unit']} is failing to start ({t['state']}" + (f", {t['restarts']} restarts" if t["restarts"] else "") + ")"
+    if t["last"]:
+        out += f". Its last error: {t['last']}"
+    if t["fix"]:
+        out += f". Fix: {t['fix']}"
+    return out
 
 
 # At boot the user manager can start Shepr before Tailscale is connected. `tailscale serve` then fails ("unexpected
@@ -3260,6 +3946,9 @@ def cli_pair(a):
         if ts:   # most likely why it is down: the unit waits for Tailscale, then fails without it, so "start it" alone would just wait again
             sys.exit(f"shepr: the server is not running here, and {ts[0]}. Shepr only answers over your tailnet, so its unit cannot "
                      f"come up without Tailscale.\nFix that first ({ts[1]}), then start Shepr: " + unit_hint())
+        ut = unit_trouble()
+        if ut:   # systemd is already trying to start it and failing: "start it" would be no help at all
+            sys.exit("shepr: the server is not running here: " + unit_trouble_text(ut) + f".\nSee it all: journalctl --user -u {ut['unit']} -n 40")
         sys.exit("shepr: the server is not running here. Start it first: " + unit_hint())
     code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(12))
     shown = "-".join(code[i:i + 4] for i in range(0, 12, 4))
@@ -3328,6 +4017,7 @@ def cli_status(a):
     out["boot_unsafe"] = [n for n in out["units"] if not boot_safe(n)]
     ts = None if info else tailscale_problem()
     out["tailscale"] = f"{ts[0]}. Fix: {ts[1]}" if ts else None   # only asked when the server is down
+    out["unit_error"] = None if info else unit_trouble(out["units"])   # likewise: systemd is asked only when there is something to explain
     def look(route, session):
         agents = run_herdr(route, ["agent", "list"], timeout=6)["result"]["agents"]
         labels = {w["workspace_id"]: w.get("label") for w in run_herdr(route, ["workspace", "list"], timeout=6)["result"]["workspaces"]}
@@ -3359,6 +4049,8 @@ def cli_status(a):
     print(f"shepr {BOOT_BUILD}: " + (f"running at {out['url']}" if out["running"] else f"not running. Start it: {unit_hint()}"))
     if out["tailscale"]:
         print(f"  warning: {out['tailscale']}. Shepr needs it to start")
+    if out["unit_error"]:
+        print("  why: " + unit_trouble_text(out["unit_error"]))
     print(f"  {out['devices']} phone(s) paired" + ("" if out["devices"] else ". Pair one: shepr pair"))
     for n in out["boot_unsafe"]:
         print(f"  warning: {n} may stay down after a reboot (it does not wait for Tailscale). Fix once: shepr fix-boot")
@@ -3494,25 +4186,34 @@ def main():
     except OSError:
         pass
     learn_tailnet()
-    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
-    with open(state_path("server.json"), "w") as f:
-        json.dump({"pid": os.getpid(), "port": a.port, "url": public_url(a.port), "started": int(time.time())}, f)
+    handler = functools.partial(Handler, directory=HERE)
+    try:
+        srv = CappedServer((a.bind, a.port), handler)
+    except OSError as e:
+        # Nothing has been written yet. server.json used to be written BEFORE the port was taken, so a second Shepr started
+        # by mistake replaced it with its own (dead) pid, and `shepr pair` then said the running server was not running.
+        sys.exit(f"shepr: cannot listen on {a.bind}:{a.port}: {e.strerror or e}. Is another Shepr already running here? (shepr status)")
     try:
         os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
         os.chmod(STATE_DIR, 0o700)   # an older or hand-made state directory must not be readable by other users
     except OSError:
         pass
+    _tailnet["port"] = a.port
+    write_server_json(a.port)
+    if not tailnet_known() and shutil.which("tailscale"):
+        threading.Thread(target=tailnet_retry_loop, daemon=True).start()
     devices()
     load_push()
     prune_waits()
+    prune_events()
+    if WATCH_ON:
+        threading.Thread(target=watch_loop, daemon=True).start()   # reads Claude Code's session files on its own slow clock
     threading.Thread(target=poller, daemon=True).start()
     if AUTOADD and not os.environ.get("SHEPR_LOCAL_ONLY"):
         threading.Thread(target=autoscan_loop, daemon=True).start()
     threading.Thread(target=LIVE.run, daemon=True).start()   # sends Lock Screen card updates; idle until a phone registers
     if not USAGE_FIXTURE:
         threading.Thread(target=METER.loop, daemon=True).start()   # the subscription meter, on its own slow clock
-    handler = functools.partial(Handler, directory=HERE)
-    srv = CappedServer((a.bind, a.port), handler)
     print(f"shepr: serving {HERE} on http://{a.bind}:{a.port} as {LOCAL} "
           f"(owner={OWNER['login']}, devices={len(DEVICES)}, writes={'off' if READONLY else 'on, confirm-first'}"
           f"{', tailnet auto-add every ' + format(SCAN_EVERY_S, 'g') + ' s' if AUTOADD else ''})",

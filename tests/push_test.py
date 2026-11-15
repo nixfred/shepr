@@ -39,7 +39,7 @@ check("vapid: the key is kept 0600 and is the same after a restart", mode == 0o6
 
 # ---- subscribing
 srv.push_subscribe("devA", {"subscription": {"endpoint": EP, "keys": {"p256dh": "k", "auth": "a"}}, "prefs": {"blocked": True, "done": False}})
-check("subscribe: stored 0600 with the phone's preferences", os.stat(srv.state_path("push.json")).st_mode & 0o777 == 0o600 and srv.push_config("devA")["subscribed"] and srv.push_config("devA")["prefs"] == {"blocked": True, "done": False})
+check("subscribe: stored 0600 with the phone's preferences", os.stat(srv.state_path("push.json")).st_mode & 0o777 == 0o600 and srv.push_config("devA")["subscribed"] and srv.push_config("devA")["prefs"] == dict(srv.PUSH_PREF_DEFAULTS, blocked=True, done=False))
 for bad in ("https://evil.example/x", "http://web.push.apple.com/x", "https://web.push.apple.com.evil.com/x", "https://127.0.0.1/x", "https://localhost/x",
             "https://user:pw@web.push.apple.com/x", "https://web.push.apple.com:8443/x", "http://127.0.0.1:1/x", "ftp://web.push.apple.com/x", "https://169.254.169.254/x", "https://web.push.apple.com/" + "a" * 800, ""):
     try: srv.push_subscribe("devX", {"subscription": {"endpoint": bad}}); accepted = True

@@ -59,6 +59,20 @@ case "${1:-}" in
     HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     mk nomenu "$HOME/Projects/whats-next" blocked claude "Blocked with nothing to answer" "$HERE/sample-nomenu.txt" ;;
   free-rm|nomenu-rm) for w in $(H workspace list | python3 -c 'import json,sys;[print(w["workspace_id"]) for w in json.load(sys.stdin)["result"]["workspaces"] if w["label"] in ("freetext","nomenu")]'); do H workspace close "$w" >/dev/null; done ;;
+  risk) for w in $(H workspace list | python3 -c 'import json,sys;[print(w["workspace_id"]) for w in json.load(sys.stdin)["result"]["workspaces"] if w["label"]=="riskdemo"]'); do H workspace close "$w" >/dev/null; done
+    HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    mk riskdemo "$HOME/Projects/whats-next" blocked claude "A permission that would allow something risky" "$HERE/sample-risk.txt" ;;
+  changes) for w in $(H workspace list | python3 -c 'import json,sys;[print(w["workspace_id"]) for w in json.load(sys.stdin)["result"]["workspaces"] if w["label"]=="shipyard"]'); do H workspace close "$w" >/dev/null; done
+    # A small git project with one commit, one changed file and two new ones, made fresh each time (nothing is ever deleted here).
+    HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; D=$(mktemp -d /tmp/shepr-changes.XXXXXX)/shipyard; mkdir "$D"
+    G(){ git -C "$D" -c user.name=Shepr -c user.email=shepr@example.invalid -c commit.gpgsign=false -c init.defaultBranch=main "$@" >/dev/null 2>&1; }
+    G init -q -b main; printf 'def load(path):\n    return open(path).read()\n\n\ndef main():\n    print(load("a.txt"))\n' > "$D/loader.py"; printf 'shipyard\n' > "$D/README.md"
+    G add -A; G commit -q -m "first cut of the loader"
+    printf 'def load(path, encoding="utf-8"):\n    with open(path, encoding=encoding) as f:\n        return f.read()\n\n\ndef main():\n    print(load("a.txt"))\n' > "$D/loader.py"
+    printf 'notes for the next step\n' > "$D/NOTES.md"; printf 'release checklist\n' > "$D/CHECKLIST.md"
+    if [ "${2:-}" = odd ]; then printf 'plain text, not markup\n' > "$D/<i>odd name.txt"; fi   # the UI test checks that a file name with tags in it stays text
+    mk shipyard "$D" idle claude "Refactor the loader" "$HERE/sample-pane.txt" ;;   # "done" is not a state herdr lets anyone fake
+  risk-rm|changes-rm) for w in $(H workspace list | python3 -c 'import json,sys;[print(w["workspace_id"]) for w in json.load(sys.stdin)["result"]["workspaces"] if w["label"] in ("riskdemo","shipyard")]'); do H workspace close "$w" >/dev/null; done ;;
   multi-rm) H workspace list | python3 -c 'import json,sys;[print(w["workspace_id"]) for w in json.load(sys.stdin)["result"]["workspaces"] if w["label"]=="multi"]' | while read w; do H workspace close "$w" >/dev/null; done ;;
   down) herdr session stop hrtest < /dev/null ;;
   env) echo "export HERDR_SOCKET_PATH=$SOCK SHEPR_STATE=/tmp/shepr-test-state SHEPR_POLL=3" ;;

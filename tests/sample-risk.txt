@@ -1,0 +1,12 @@
+● The branch is rebased. I will replace the remote one now.
+
+────────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   git push --force origin main
+   Replace the remote branch with the rebased one
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for git push commands in /home/u/Projects/whats-next
+   3. No, and tell Claude what to do differently (esc)

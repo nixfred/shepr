@@ -806,3 +806,81 @@ html[data-motion=off] *,html[data-motion=off] *::before,html[data-motion=off] *:
 .setbody>.devbox{flex:1 1 60px;min-height:60px;max-height:none}
 .devbox.more{-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 22px),transparent);mask-image:linear-gradient(to bottom,#000 calc(100% - 22px),transparent)}
 .exgit{margin-left:8px;padding:1px 6px;border:1px solid var(--line);border-radius:6px;font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);vertical-align:middle}
+
+/* ---- v49, the watch: what the agents have been doing. Same vocabulary as the Subs page: monospace caps for labels, a tone on the left edge. */
+.item .age.busy{color:var(--accent)}
+.item .age.quiet{color:var(--warn)}
+.item .age.quiet small{color:var(--warn)}
+.item .sub.risk{font-size:12.5px;font-weight:700;margin-top:1px}
+.item .sub.risk.danger{color:var(--hot)} .item .sub.risk.note{color:var(--warn)}
+.radar .rdot.quiet .rcore{fill:var(--warn);filter:drop-shadow(0 0 4px rgba(255,176,0,.8))}
+.strip{--tone:var(--accent);display:flex;align-items:center;gap:8px;flex:0 0 auto;width:100%;padding:8px 12px;margin-bottom:6px;border-radius:12px;
+  border:1px solid color-mix(in srgb,var(--tone) 40%,var(--line));border-left:4px solid var(--tone);background:var(--card)}
+.strip b{font:800 11.5px ui-monospace,Menlo,monospace;letter-spacing:1px;color:var(--tone);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.strip span{font-size:13px;line-height:1.3;color:var(--txt)}
+.strip .st{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+.strip .mini-btn{min-height:34px;padding:0 11px;font-size:14px}
+.strip.stopped{--tone:var(--hot);flex-direction:column;align-items:flex-start;gap:2px}
+.strip.stopped b{text-shadow:0 0 12px rgba(255,77,109,.5)}
+.strip.nudge{--tone:var(--warn)}
+.mini-btn.dimb{border-color:var(--line);color:var(--dim)}
+.mini-btn.x{padding:0 10px}
+.cchips{display:flex;flex-wrap:nowrap;gap:5px;margin-top:3px;overflow:hidden}
+.strip .cchip{font:700 11.5px ui-monospace,Menlo,monospace;padding:1px 7px 2px;border-radius:8px;border:1px solid color-mix(in srgb,var(--tone) 55%,var(--line));color:var(--tone);white-space:nowrap}
+.ledger.act svg.ticks{flex:0 0 110px;width:110px;height:28px}
+.ticks .t-hot{fill:var(--hot)} .ticks .t-warn{fill:var(--warn)} .ticks .t-ok{fill:var(--ok)} .ticks .t-accent{fill:var(--accent)} .ticks .t-dim{fill:#3a4d61}
+.actseg .mini-btn{min-height:34px;padding:0 2px;font-size:13px}
+/* WHY: the list is the only part of the sheet that scrolls (Law 17: a list scrolls in its own box, the page never does). */
+.actlist{gap:6px;flex:1 1 auto;min-height:120px}
+.arow{--tone:var(--dim);display:flex;gap:10px;align-items:flex-start;flex:0 0 auto;padding:8px 10px;border-radius:10px;background:var(--card);border:1px solid var(--line);border-left:3px solid var(--tone)}
+.arow.open:active,.arow.pressing{background:#14202f}
+.arow .at{flex:0 0 auto;min-width:44px;font:700 11.5px ui-monospace,Menlo,monospace;color:var(--dim);padding-top:3px}
+.arow .am{flex:1 1 auto;min-width:0}
+.arow .a1{display:flex;align-items:baseline;gap:7px;min-width:0}
+.arow .a1 b{font-size:15.5px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.arow .a1 i{flex:0 0 auto;font:800 10.5px ui-monospace,Menlo,monospace;letter-spacing:1px;text-transform:uppercase;color:var(--tone);white-space:nowrap}
+.arow .a2{font-size:13.5px;color:var(--txt);overflow-wrap:anywhere}
+.arow .acmd{font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#ffd0d8;background:#12080c;border:1px solid #3a1a24;border-radius:6px;padding:4px 6px;margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere}
+.bn-spans{display:flex;gap:4px}
+.bn-span{min-width:40px;min-height:28px;padding:0 6px;background:none;border:1px solid var(--line);color:var(--dim);font:800 11px ui-monospace,Menlo,monospace;letter-spacing:.6px}
+.bn-span.on{border-color:var(--accent);color:var(--accent)}
+.bn-g{margin:4px 0 2px}
+.bn-spark{display:block;width:100%;height:26px}
+.bn-spark rect{fill:#1d6f78} .bn-spark rect.peak{fill:var(--accent)}
+.bn-r{--tone:var(--accent);display:grid;grid-template-columns:minmax(0,1.3fr) 1fr 38px;gap:1px 8px;align-items:center;margin-top:6px}
+.bn-r.open:active,.bn-r.pressing{background:#122033}
+.bn-n{display:flex;align-items:baseline;gap:6px;min-width:0}
+.bn-n b{font-size:13.5px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bn-m{flex:0 0 auto;font:800 9.5px ui-monospace,Menlo,monospace;font-style:normal;letter-spacing:.8px;text-transform:uppercase;padding:0 4px;border:1px solid #3a4b5e;border-radius:5px;color:var(--dim)}
+.bn-m.fable{color:#f472b6;border-color:#6b2c4f}.bn-m.opus{color:#c084fc;border-color:#4b2f6b}.bn-m.sonnet{color:#4dd0ff;border-color:#1f4d63}.bn-m.haiku{color:#5eead4;border-color:#1f5a52}
+.bn-r .sc-rt{color:#fff;text-align:right}
+.bn-s{grid-column:1 / -1;font-size:10.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bn{--tone:var(--accent);position:relative;overflow:hidden;padding:6px 11px 7px 12px;background:var(--card);border:1px solid var(--line);border-left:3px solid var(--tone);
+  clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
+.bnlist{flex:1 1 auto;min-height:120px}
+.bnlist .bn{flex:0 0 auto}
+/* WHY: the chip must not make the card taller (the four plan cards fill a phone screen exactly), yet a thumb needs more than 20px:
+   the button is drawn small and its ::after carries the touch area. */
+.sc-h .who{position:relative;flex:0 0 auto;margin:0 auto 0 8px;padding:0 6px;height:18px;border:1px solid color-mix(in srgb,var(--accent) 55%,var(--line));border-radius:5px;background:none;color:var(--accent);
+  font:800 9.5px/16px ui-monospace,Menlo,monospace;letter-spacing:1px}
+.sc-h .who::after{content:'';position:absolute;left:-10px;right:-14px;top:-12px;bottom:-14px}
+.sc-h .who:active{background:rgba(0,240,255,.14)}
+.nb.chg{font-weight:800;font-size:21px;line-height:40px;padding-top:3px}
+.chg{display:flex;flex-direction:column;gap:8px;min-height:0;flex:1 1 auto}
+.chg-p{display:flex;flex-wrap:wrap;gap:6px;flex:0 0 auto}
+.chg-f{flex:1 1 auto;min-height:70px;max-height:34vh;gap:5px}
+.chg-c{flex:0 1 auto;max-height:20vh;gap:5px}
+.crow{display:flex;align-items:baseline;gap:8px;flex:0 0 auto;min-width:0;padding:7px 10px;border-radius:9px;background:var(--card);border:1px solid var(--line)}
+.crow:active,.crow.pressing{background:#14202f}
+.crow .cx{flex:0 0 54px;font:800 10px ui-monospace,Menlo,monospace;letter-spacing:.8px;text-transform:uppercase;color:var(--warn)}
+.crow .cx.c-new,.crow .cx.c-A{color:var(--ok)} .crow .cx.c-D{color:var(--hot)}
+.crow .cp{flex:1 1 auto;min-width:0;font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#fff;overflow-wrap:anywhere}
+.crow .cn{flex:0 0 auto;font:700 12px ui-monospace,Menlo,monospace;color:var(--dim);white-space:nowrap}
+.crow.com .ch{flex:0 0 auto;font:700 12px ui-monospace,Menlo,monospace;color:var(--accent)}
+.crow.com .cp{font:14px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crow.com.un{border-left:3px solid var(--warn)}
+.dview{flex:1 1 auto;min-height:120px;max-height:54vh;overflow:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;background:#05080c;border:1px solid var(--line);border-radius:10px;padding:6px 0;
+  font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}
+.dl{padding:0 8px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--txt)}
+.dl.add{background:rgba(124,255,0,.09);color:#c8ffa0} .dl.del{background:rgba(255,77,109,.10);color:#ffc2cd} .dl.hunk{color:var(--accent);margin-top:6px}
+.warnbox.risk{border-color:var(--hot);box-shadow:0 0 14px rgba(255,77,109,.28);font-weight:700}

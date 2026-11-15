@@ -57,6 +57,11 @@ shepr pair                                                           # shows a Q
 
 **Installed before 2026-10-14?** Run `shepr fix-boot` once. The old unit could start before Tailscale was connected at boot, fail on `tailscale serve`, and stay down after systemd's five quick retries, so the phone found nothing until someone started it by hand. `fix-boot` adds a drop-in that waits for Tailscale and keeps retrying; `shepr status` warns while a unit still lacks it.
 
+**A unit that keeps failing says why.** When the server is down and systemd is still trying to start it, `shepr status` and `shepr pair`
+print the unit's last real error line from its journal and how often it restarted, and the fix when they recognise the cause
+(`tailscale serve` refused for a user who is not its operator: `sudo tailscale set --operator=$USER`). Before v49 they said only
+"not running, start it".
+
 **Tailscale has to be connected.** Shepr only answers over your tailnet, so the unit waits up to two minutes for Tailscale at start and fails when it is off or logged out (`enable --now` then reports `control process exited with error code`, and the unit keeps retrying). When the server is down, `shepr pair` and `shepr status` check Tailscale and say so, for example *Tailscale is turned off on this machine* with the fix (`tailscale up`), instead of only telling you to start a unit that cannot start. Connect Tailscale, then `systemctl --user start shepr`.
 
 The link goes in `~/.local/bin` or `~/bin`, whichever comes first on `PATH`. If neither does, this paste uses `~/.local/bin` and adds it for this shell. The unit written here is named `shepr`. A nixweb install keeps the unit name it already chose.
@@ -194,6 +199,8 @@ record where the phone's notification worker can read it), so the lock screen ne
 The host only sends to the real push services (Apple, FCM, Mozilla, Windows), never to an address a phone makes up, never
 follows a redirect, and sends a phone at most one push every 20 seconds. Only blocked and finished states the host watched begin
 count, not what was already true when it started. Revoking a phone removes its subscription. Tapping a notification opens that session.
+A Home Screen app that has notifications off says so once a week at the top of the Queue: a phone that was paired again starts with none,
+and nothing used to say so.
 
 ### Lock Screen card (optional, a small native app)
 
@@ -244,6 +251,48 @@ countdown (how long the bank is, or when to come back if you stop now) ticks liv
 A provider that is not installed is not shown. One that is installed but cannot be read says why on its card (`Sign-in expired`, `Not signed in here`, rate limited). Codex and Grok write their figures only when they run, so after 20 minutes their numbers carry a `~` and the card says when they were measured. The history behind the graphs is Shepr's own (`usage-samples.jsonl`, private to you, pruned), so a new install draws its curves from the day it starts. `SHEPR_USAGE=0` turns the meter off entirely. The pace rules (even spend, banked, the burn-down, the occasional friendly reset) are ported from [Burn Bar](https://github.com/nixfred/burnbar), which does the same job in an Omarchy bar; Shepr does not read Burn Bar's or Omarchy's files.
 
 The page opens with one line of advice (the rules Burn Bar uses, ported): **USE CODEX NEXT**, and why (`32% of its week is banked, about 3d ahead, resets in 4d`), or **USE IT NOW** when a reset is under a day away with budget unspent, or **NOTHING HAS ROOM**. Only a subscription that is ahead of an even spend is ever suggested, one whose 5-hour window is nearly full never is, a snapshot such as Grok needs a bigger margin, and with fewer than two subscriptions there is nothing to choose between, so the line is not shown. Under it, which ones are resting and for how long.
+
+### The watch
+
+A queue of questions tells you who is waiting on you. It says nothing about what your agents have been doing, and an agent started
+with its permission prompts switched off never asks first. So the host also reads Claude Code's own session files (`watch.py`:
+`~/.claude/projects` on the machine Shepr runs on, read only, nothing in them executed, nothing sent anywhere), and the phone
+shows five more things.
+
+<p align="center"><img src="docs/img/watch.png" alt="The watch: the Queue with a quiet agent and a risky command, the Activity sheet, who is burning the plan, and a project's changes" width="100%"></p>
+
+*Captured from the running app against an isolated test session. The sessions, commands and numbers are made up.*
+
+- **Who is burning it** (the Subs tab: **WHO ›** on the Claude card). Each session's share of this host's token use over the last hour, 5 hours
+  or 24 hours, biggest first, with its model, the exact tokens written and read, the number of replies, and how much of it was its
+  helpers (subagents). A share weighs Claude Code's own per-reply counts: a written token about five times a fresh one read, a
+  cached one a tenth, a dearer model more (`SHEPR_BURN_WEIGHTS` changes the model factors). Nobody outside Anthropic knows how a
+  plan counts them, so it is shown as a share, never as money. Tap a session that is still open to go to it.
+- **Risky commands.** The commands an agent RAN that you would want to know about. Red: a force push, `git reset --hard`,
+  `git clean`, `git checkout .`, rewriting history, a recursive delete of a whole tree, writing straight to a disk, a download
+  piped into a shell, dropping a table, `terraform destroy` or `kubectl delete`, `tailscale serve` or `funnel`, sending email,
+  shutting the machine down. Amber: a force push with a lease, a recursive delete outside a scratch folder, `--no-verify`,
+  disabling a service, `chmod 777`, removing packages, publishing a package, pruning containers. Only what a shell would
+  actually run is judged: a commit message, a grep pattern or a file being written that merely mentions a command is not. The
+  agent's row in the Queue says what it ran in the last hour; the Activity sheet shows the command itself. If you keep permission
+  prompts on, the same check runs on the dialog: the confirm sheet says what the approval would allow, and Send stays dead for 2.5
+  seconds instead of 0.7.
+- **Quiet, and everything stopped.** A working agent whose session has written nothing for 15 minutes (`SHEPR_QUIET_MIN`) is
+  marked **quiet**, in amber, first among the working: a long step, or a stuck one, either way worth a look. Otherwise a working
+  row says how long its turn has run. And when nothing is working any more while something waits on you, the top of the Queue
+  says **EVERYTHING HAS STOPPED**, since when, and how many are waiting.
+- **Activity, and while you were away.** A strip in the Queue draws the last 24 hours as ticks; the sheet behind it lists what
+  happened, newest first: questions asked and answered (with the wait), sessions finishing, agents going quiet, full stops, hosts
+  dropping out, risky commands, and what you sent from a phone. Open Shepr after 20 minutes or more away and the Queue leads with
+  **WHILE YOU WERE AWAY**: what changed since you last looked, and one tap to read it. Kept 7 days in `events.jsonl` (`0600`).
+- **Changes.** In a session on the machine Shepr runs on, **±** shows what git says about its project: the branch, what is not
+  pushed, the files changed with their added and deleted lines, and the latest commits. Tap a file for its diff. It only reads
+  (status, log, diff), with git's optional locks off so it never collides with the agent's own git, and it shows only files git
+  itself lists as changed.
+
+Notifications can cover these too (**Settings > Alerts**): **Everything has stopped**, **An agent has gone quiet**, **An agent ran
+something risky** (red ones only). A notification names the project and one of the labels above, never a command.
+`SHEPR_WATCH=0` switches all of it off.
 
 ### A live screen
 
@@ -352,6 +401,11 @@ Every setting is an environment variable on the server. Nothing needs setting fo
 | `SHEPR_SESSIONS` | all | Which running named herdr sessions on this machine to include: unset or `all` is every one, a comma list (`work,review`) only those, `default` none (just the plain session). The session your `HERDR_SOCKET_PATH` already points at is never listed twice. |
 | `SHEPR_AUTOADD` | off | `1` scans your tailnet in the background and saves the nodes that are running herdr (see More hosts). Ignored when `SHEPR_READONLY=1`. |
 | `SHEPR_SCAN_S` | `300` | Seconds between those background scans (60 at least). |
+| `SHEPR_WATCH` | on | `0` switches the watch off: no session files are read, so no burn, no risky commands and no quiet. |
+| `SHEPR_WATCH_S` | `60` | Seconds between passes over Claude Code's session files (5 at least). A pass with nothing new costs one `stat` per recent file. |
+| `SHEPR_QUIET_MIN` | `15` | Minutes without output after which a working agent is called quiet. |
+| `SHEPR_BURN_WEIGHTS` | built in | Model factors for the burn shares, for example `opus=3,sonnet=1,haiku=0.2`. |
+| `SHEPR_ALLOW_PROXY` | off | `1` accepts requests that came through a reverse proxy of your own. Without it a forwarded request with no tailnet user on it is refused. |
 | `SHEPR_READONLY` | off | `1` turns every write off. |
 | `SHEPR_USAGE` | on | `0` turns the subscription meter off. |
 | `SHEPR_VAPID_SUB` | this repository's address | The contact the push service sees. |
@@ -377,7 +431,12 @@ The tests also use `SHEPR_LOCAL_ONLY`, `SHEPR_PUSH_ALLOW`, `SHEPR_USAGE_FIXTURE`
 - The server listens on loopback and trusts `tailscale serve` to be the only way in. Another process on the same
   machine can reach that port directly and is not asked for the Tailscale identity header (which it could forge
   anyway). It still cannot read or send anything: every `/api` call except `hello` and `pair` needs a signature from
-  a paired phone, and pairing needs a one-time code from `shepr pair`.
+  a paired phone, and pairing needs a one-time code from `shepr pair`. A request `tailscale serve` forwards with no
+  user on it (a tagged device) is refused; before v49 it was taken for a local process.
+- The watch reads Claude Code's session files only, and only on the machine Shepr runs on: Codex sessions and sessions
+  on other machines have no burn, no risky-command log and no quiet mark. The list of risky commands is short on
+  purpose and is a notice, not a guard: it tells you after the fact, it stops nothing, and a command can be written to
+  slip past it. It was tuned on one day of real sessions (107 hits at first, 14 that mattered after tuning).
 - Shepr polls every machine that is enabled in your herdr config. Machines you add from the Hosts tab, or that
   `SHEPR_AUTOADD` adds, are limited to your own tailnet nodes, but one you added to herdr by hand is yours to vouch for.
 - The Lock Screen card is a separate native app (`ios/`). Apple ends a card after 8 hours (it leaves the Lock Screen at most 4 hours
@@ -395,6 +454,7 @@ The tests also use `SHEPR_LOCAL_ONLY`, `SHEPR_PUSH_ALLOW`, `SHEPR_USAGE_FIXTURE`
 server.py            static files, /ping, /api, and the shepr CLI (pair|devices|revoke|status). Standard library only.
 manifest.json        the Omarchy plugin: Service.qml (asks the CLI), BarWidget.qml (the badge), ShepPanel.qml (the panel), preview.png
 usage.py             the subscription meter: Claude, Codex, Grok and Kimi plan usage, measured on the host. Standard library only.
+watch.py             the watch: reads Claude Code's own session files for token use, risky commands and last activity. Standard library only.
 live.py              feeds the Lock Screen card: builds the status, seals it, pushes it to Apple (curl speaks HTTP/2). Standard library only.
 ios/                 the optional native companion, Shepr Live and its Live Activity (Swift, Apple frameworks only). See ios/README.md.
 index.html app.css app.js sw.js manifest.webmanifest
@@ -404,7 +464,7 @@ docs/img/            the graphics above (hand-built SVG) and real screenshots
 tests/               the UI suite (ui.mjs), the Python and node suites listed under Testing, fake-session.sh, shots.mjs
 ```
 
-State: `~/.local/state/shepr/` (`devices.json`, `seen.json`, `pairing.json`, `usage-samples.jsonl`, `sends.jsonl` audit log, and for the Lock Screen card `live.json`, `apns.json`, `AuthKey.p8`), mode 0600.
+State: `~/.local/state/shepr/` (`devices.json`, `seen.json`, `pairing.json`, `usage-samples.jsonl`, `sends.jsonl` audit log, `events.jsonl` activity log, and for the Lock Screen card `live.json`, `apns.json`, `AuthKey.p8`), mode 0600.
 Logs: `journalctl --user -u shepr -f`. The app shell is fetched network-first (2.5 s, then
 cache) so a change shows on the next open and the app still opens offline.
 The host also announces the current build (`/api/hello`, `/api/queue`). A Home Screen app can stay alive in iOS
@@ -421,10 +481,11 @@ eval "$(tests/fake-session.sh env)"
 export SHEPR_LOCAL_ONLY=1 SHEPR_URL=http://localhost:8743 SHEPR_POLL=3   # LOCAL_ONLY: a real machine on your tailnet cannot change a result
 export CLAUDE_HOME=$PWD/tests/fixtures/claude-home CODEX_HOME=$PWD/tests/fixtures/codex-home   # fixture skills and conversations
 export SHEPR_USAGE_FIXTURE=/tmp/claude-1000/shepr-usage.json   # the Subs page reads the fixture tests/ui.mjs writes
+export SHEPR_WATCH_FIXTURE=/tmp/claude-1000/shepr-watch.json SHEPR_WATCH_S=5   # the burn and the risky commands come from the fixture tests/ui.mjs writes
 export SHEPR_CLAUDE_CMD='echo STARTED' SHEPR_CODEX_CMD='echo CODEX' SHEPR_NEW_CMD='echo CCC' SHEPR_PROJECTS=/tmp/shepr-projects SHEPR_PUSH_ALLOW=127.0.0.1:9988 SHEPR_AWAIT_CLEAR_S=3
 python3 server.py 8743 &
 node tests/ui.mjs; node tests/small_screen.mjs; node tests/sw_offline.mjs; node tests/push_sw.mjs; node tests/format.mjs; node tests/draft_commit.mjs; python3 tests/pair_cli_test.py
-for t in menu_parse server_hardening history push usage ledger status qr_secret live autoadd network_gate plan_host open_folder sessions tailscale_off; do python3 tests/${t}_test.py; done   # pure Python, no server needed
+for t in menu_parse server_hardening history push usage ledger status qr_secret live autoadd network_gate plan_host open_folder sessions tailscale_off watch watch_server fixes_v49; do python3 tests/${t}_test.py; done   # pure Python, no server needed
 node tests/shots.mjs                           # regenerates docs/img/screens.png from the RUNNING app
 (cd ios && swift test && swift run shepr-live-render /tmp/shepr-render)   # macOS with Xcode: the Lock Screen card, and a 160 pt height check
 tests/fake-session.sh down

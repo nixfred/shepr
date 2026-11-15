@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v48';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v49';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -327,7 +327,7 @@ function fetchQueue(fresh) {
   if (fetching) { if (fresh) fetchAgain = true; return fetching; }
   $('mini').classList.add('busy');
   fetching = api('api/queue' + (fresh ? '?fresh=1' : '')).then((q) => {
-    S.q = q; setOnline(!q.cached); render(); if (!q.cached) { appIsStale(q.build); updateBadge(); if (!S.ledgerAt || Date.now() - S.ledgerAt > 60000) loadLedger(); }
+    S.q = q; setOnline(!q.cached); safeRender(); if (!q.cached) { appIsStale(q.build); updateBadge(); if (!S.ledgerAt || Date.now() - S.ledgerAt > 60000) loadLedger(); loadActivity(false); afterQueue(); }
     // The app files can be newer than the server process behind them (files are served live, the server only changes when
     // it restarts). New buttons then fail in confusing ways, so say it plainly once.
     if (!q.cached && q.server_build && q.build && q.server_build !== q.build && !S.skewShown) {
@@ -337,6 +337,13 @@ function fetchQueue(fresh) {
   }).catch((e) => { console.warn('queue fetch failed:', e && e.message, e && e.stack && e.stack.split('\n').slice(0, 3).join(' | ')); if (!e.status) setOnline(false); if (!S.q) paintMain(); })
     .finally(() => { fetching = null; setTimeout(() => $('mini').classList.remove('busy'), 400); if (fetchAgain) { fetchAgain = false; fetchQueue(true); } });
   return fetching;
+}
+// Drawing is not fetching: a mistake while drawing must say so, and never be taken for a host that cannot be reached.
+function safeRender() {
+  try { render(); } catch (e) {
+    console.warn('[shepr] could not draw:', e);   // a warning in the console: the person is told in a toast, which is the report that matters
+    if (!S.drawErr) { S.drawErr = true; notify('Shepr could not draw this screen (' + ((e && e.message) || 'error') + '). Reload Shepr; if it stays, the app and the host may be different versions.', true, ['Reload', () => location.reload()], true); }
+  }
 }
 const agents = () => (S.q ? S.q.agents : []);
 const byKey = (k) => agents().find((a) => keyOf(a) === k);
@@ -362,7 +369,7 @@ const finished = () => agents().filter((a) => a.status === 'done' && !isSeen(a) 
 const finishedSeen = () => agents().filter((a) => a.status === 'done' && isSeen(a) && inHost(a));
 const byName = (a, b) => a.host.localeCompare(b.host) || nm(a).localeCompare(nm(b));
 const sleeping = () => agents().filter((a) => a.status === 'idle' && inHost(a)).sort(byName);
-const working = () => agents().filter((a) => a.status === 'working' && inHost(a)).sort(byName);
+const working = () => agents().filter((a) => a.status === 'working' && inHost(a)).sort((a, b) => (isQuiet(b) - isQuiet(a)) || byName(a, b));   // the quiet ones first: they are the ones to look at
 // The Queue, in the order that matters: needs you, finished, working, and sleeping last.
 const queueList = () => waiting().concat(finished(), finishedSeen(), working(), sleeping());
 
@@ -430,10 +437,24 @@ function ageBox(a) {
     box.textContent = f.main;
     const c = ageClass(a.for_s); if (c) box.classList.add(c);
     box.append(el('small', null, f.sub || (a.status === 'done' ? 'done' : 'blocked')));
+  } else if (a.status === 'working' && (isQuiet(a) || a.work_s != null)) {
+    // A turn Shepr watched begin says how long it has run; one that has written nothing for a while says THAT instead, in amber.
+    const quiet = isQuiet(a), f = fmtAge(quiet ? a.quiet_s : a.work_s, true);
+    box.textContent = f.main; box.classList.add(quiet ? 'quiet' : 'busy');
+    box.append(el('small', null, quiet ? 'quiet' : 'working'));
   } else {
     box.append(el('span', 'sdot ' + a.status), el('small', null, a.status));
   }
   return box;
+}
+// "Quiet": working, and its session has written nothing for longer than the host's threshold. The agent may be on a long step,
+// or stuck: either way it is worth a look, which is all this says.
+const isQuiet = (a) => a.status === 'working' && a.quiet_s != null && S.q && a.quiet_s >= (S.q.quiet_min || 15) * 60;
+const shortWhat = (w) => String(w || '').replace(/\s*\(.*$/, '');
+function riskLine(a) {
+  const r = a.risk; if (!r) return null;
+  const mins = Math.max(0, Math.round(((S.q ? S.q.now : Date.now() / 1000) - r.t) / 60));
+  return el('div', 'sub risk ' + (r.level === 'danger' ? 'danger' : 'note'), '\u26a0 ' + shortWhat(r.what) + ' \u00b7 ' + (mins < 1 ? 'just now' : mins + 'm ago'));
 }
 
 // One line saying what is waiting in a session's message box: your first words, and how many photos are with them.
@@ -465,6 +486,7 @@ function itemNode(a, ctx, compact, idx) {
                                 : el('div', 'sub nomenu', 'Blocked, but no question is on screen. Open it to look.');
   }
   m.append(t, sub);
+  const rl = riskLine(a); if (rl) m.append(rl);   // something it ran in the last hour that you would want to know about
   const dg = draftGlance(drafts.get(keyOf(a)));   // words you typed here and did not send
   if (dg) m.append(el('div', 'sub draft', '\u270e ' + dg));
   n.append(m, el('div', 'chev', '\u203a'));
@@ -556,6 +578,7 @@ function paintMain() {
       m.append(nb);
       const lg = ledgerStrip(); if (lg) m.append(lg);
     }
+    [stoppedStrip(), catchUpCard(), pushNudge(), activityStrip()].forEach((n) => { if (n) m.append(n); });
     if (!w.length && !d.length) {
       const e = el('div', 'empty');
       const r = el('div', 'radar tiny'); r.append(el('i'), el('i'), el('i'), el('b'));
@@ -729,6 +752,7 @@ function subCard(ag, i, enter) {
   const prim = rows[0], rough = !ag.live;
   const card = el('div', 'sc'); card.dataset.id = ag.id; card.style.setProperty('--i', i);
   const head = el('div', 'sc-h'), nm = el('span', 'sc-n', ag.name), vd = el('span', 'sc-v'); head.append(nm, vd); card.append(head);
+  if (ag.id === 'claude') head.insertBefore(whoBtn(), vd);   // which sessions are spending this plan: a sheet, so the four cards still fit one screen
   if (!prim) {   // installed but not measurable: say NO DATA, why in plain words, then what to do as its own dim line
     card.style.setProperty('--tone', 'var(--dim)'); vd.textContent = 'NO DATA';
     const why = ag.status || 'No plan limits reported.', fix = /\s/.test(ag.help || '') ? ag.help : '';   // a help text is a sentence; a bare token is a code, not advice
@@ -758,9 +782,10 @@ function paintBudget() {
   BUD.ticks = []; host.textContent = '';
   const d = BUD.data, enter = host.classList.contains('enter');
   if (!d) { host.append(el('div', 'bd-empty', BUD.err ? 'Subscription budget unavailable: ' + BUD.err : 'Reading your subscriptions…')); return; }
-  if (!d.available) { host.append(el('div', 'bd-empty', d.reason || 'No subscription data on this host.')); return; }
+  if (!d.available) { host.append(el('div', 'bd-empty', d.reason || 'No subscription data on this host.')); host.append(whoStrip()); return; }
   host.append(subGuide(d));
   d.agents.forEach((ag, i) => host.append(subCard(ag, i + 1, enter)));
+  if (!d.agents.some((a) => a.id === 'claude')) host.append(whoStrip());   // no Claude plan card to carry the chip: a strip instead
 }
 async function fetchBudget(force) {
   if (BUD.busy || !S.dev || (!force && Date.now() - BUD.at < (BUD.data && BUD.data.available ? 20000 : 3000))) return;
@@ -769,6 +794,7 @@ async function fetchBudget(force) {
   paintBudget();
 }
 setInterval(() => { if (S.tab === 'subs' && !document.hidden && $('detail').hidden && !S.sheetOpen) fetchBudget(true); }, 30000);
+setInterval(() => { if ($('burncard') && !document.hidden) fetchBurn(true); }, 30000);   // only while the sheet that shows it is open
 setInterval(() => { if (S.tab === 'subs' && !document.hidden && $('detail').hidden) BUD.ticks.forEach((f) => f()); }, 1000);
 
 // ---- the fleet radar. Centre = needs you. Rings outward: waiting, finished, working, idle. Each host owns a sector. Blocked
@@ -829,7 +855,7 @@ function radarNode(list) {
     placed.push(best.box); d.label = { txt, best, bg };
   });
   dots.forEach((d) => {
-    const { a, st } = d, g = mk('g', { class: 'rdot ' + st, tabindex: '0', role: 'button', 'aria-label': nm(a) + ', ' + (STATE_LABEL[a.status] || a.status) });
+    const { a, st } = d, g = mk('g', { class: 'rdot ' + st + (isQuiet(a) ? ' quiet' : ''), tabindex: '0', role: 'button', 'aria-label': nm(a) + ', ' + (isQuiet(a) ? 'QUIET' : (STATE_LABEL[a.status] || a.status)) });
     g.dataset.key = keyOf(a);
     if (st === 'blocked') {
       const mins = Math.min(240, Math.round((a.for_s || 0) / 60));
@@ -847,7 +873,7 @@ function radarNode(list) {
   gesture(centre, { tap: () => nextWaiting() });
   svg.append(centre);
   svg.append(mk('text', { x: RAD.cx, y: RAD.cy + 8, class: 'rnum' + (waiting ? ' hot' : ''), 'text-anchor': 'middle' }, String(waiting)));
-  svg.append(mk('text', { x: RAD.cx, y: RAD.cy + 26, class: 'rcap', 'text-anchor': 'middle' }, waiting === 1 ? 'WAITING' : 'WAITING'));
+  svg.append(mk('text', { x: RAD.cx, y: RAD.cy + 26, class: 'rcap', 'text-anchor': 'middle' }, 'WAITING'));
   // The numbers above the radar: also its legend (each tile is the colour of its dots), and how long the longest wait has been.
   const by = (st) => list.filter((a) => a.status === st), longest = Math.max(0, ...by('blocked').map((a) => a.for_s || 0));
   const stats = el('div', 'rstats');
@@ -915,6 +941,273 @@ function openLedger() {
   openSheet(box);
 }
 
+// ---------------------------------------------------------------------------
+// 7b. The watch: what the agents have been doing, on top of whether they wait. Everything here READS. Nothing in it sends.
+// ---------------------------------------------------------------------------
+const fmtTok = (n) => (n >= 1e9 ? (n / 1e9).toFixed(1) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(Math.round(n || 0)));
+const awayWords = (ms) => { const m = Math.round(ms / 60000); return m < 60 ? m + ' min' : m < 1440 ? Math.floor(m / 60) + 'h ' + two(m % 60) + 'm' : Math.floor(m / 1440) + 'd ' + Math.floor(m % 1440 / 60) + 'h'; };
+function strip(cls, id) { const n = el('aside', 'strip ' + cls); if (id) n.id = id; return n; }   // an aside, not a div: a notice beside the list, not a row of it
+
+// ---- everything has stopped: nothing is working any more, and something is waiting on you
+function stoppedStrip() {
+  const f = S.q && S.q.fleet;
+  if (!f || f.working || !f.stopped_at || !(f.blocked || f.done)) return null;
+  const n = strip('stopped', 'stopped'), secs = Math.max(0, S.q.now - f.stopped_at);
+  n.append(el('b', null, 'EVERYTHING HAS STOPPED'), el('span', null, (secs >= 60 ? fmtAge(secs, true).main + ' ago · ' : '') + [f.blocked ? f.blocked + ' waiting on you' : '', f.done ? f.done + ' finished' : ''].filter(Boolean).join(', ')));
+  return n;
+}
+
+// ---- notifications are off on this phone: say so once in a while, where it will be seen (a re-paired phone starts with none)
+const NUDGE_DAYS = 7;
+function pushNudge() {
+  // Only in the Home Screen app: that is the one place an iPhone allows notifications at all, so anywhere else the button could do nothing.
+  if (!S.q || S.q.push_on !== false || !standalone || !pushOK() || (typeof Notification !== 'undefined' && Notification.permission === 'denied')) return null;
+  if (Date.now() - store.get('shepr.nudgeAt', 0) < NUDGE_DAYS * 86400000) return null;
+  const n = strip('nudge', 'pushnudge'), t = el('div', 'st');
+  t.append(el('b', null, 'NO NOTIFICATIONS ON THIS PHONE'), el('span', null, 'An agent can wait an hour before you know.'));
+  const on = btn('Turn on', 'mini-btn', () => { store.set('shepr.nudgeAt', Date.now()); pushOn().then(() => fetchQueue(true)); });
+  const no = btn('Not now', 'mini-btn dimb', () => { store.set('shepr.nudgeAt', Date.now()); paintMain(); });
+  n.append(t, on, no);
+  return n;
+}
+
+// ---- activity: what the fleet did. A slim strip in the Queue (the last 24 hours as ticks), and a sheet with the list.
+const ACT = { data: null, at: 0, busy: false };
+const ACT_KIND = {
+  blocked: ['asked', 'warn'], answered: ['answered', 'ok'], done: ['finished', 'ok'], quiet: ['went quiet', 'warn'], stopped: ['all stopped', 'hot'],
+  risk: ['ran', 'hot'], sent: ['you sent', 'accent'], send_failed: ['send failed', 'hot'], host_down: ['host down', 'hot'], host_up: ['host back', 'ok'],
+};
+function loadActivity(force) {
+  if (ACT.busy || !S.dev || (!force && Date.now() - ACT.at < 60000)) return Promise.resolve();
+  ACT.busy = true;
+  return api('api/activity?limit=300').then((d) => { ACT.data = d; ACT.at = Date.now(); if (S.tab === 'waiting' && !S.sheetOpen && !S.cur) paintMain(); })
+    .catch(() => { /* an older host has no activity: the strip simply stays away */ }).finally(() => { ACT.busy = false; });
+}
+function actTone(e) { return e.ev === 'risk' ? (e.level === 'danger' ? 'hot' : 'warn') : (ACT_KIND[e.ev] || ['', 'dim'])[1]; }
+function activityStrip() {
+  const d = ACT.data; if (!d || !d.items.length) return null;
+  const b = btn('', 'ledger act', () => openActivity()); b.id = 'activity';
+  const s = d.summary, bits = [];
+  if (s.risk_danger) bits.push(s.risk_danger + ' risky');
+  if (s.done) bits.push(s.done + ' finished');
+  if (s.blocked) bits.push(s.blocked + (s.blocked === 1 ? ' question' : ' questions'));
+  if (s.sent) bits.push(s.sent + ' sent');
+  if (s.quiet) bits.push(s.quiet + ' quiet');
+  const t = el('div', 'lt'), l1 = el('div', 'l1', 'ACTIVITY  24 h'); if (s.risk_danger) l1.classList.add('hot');
+  t.append(l1, el('div', 'l2', bits.join(' · ') || d.total + ' events'));
+  // The last 24 hours, left to right, one tick per event, coloured by what it was. A risky command is taller.
+  const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg'), W = 110, H = 28, span = 86400;
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H); svg.setAttribute('aria-hidden', 'true'); svg.setAttribute('class', 'ticks');
+  d.items.slice().reverse().forEach((e) => {
+    const x = Math.max(0, Math.min(1, 1 - (d.now - e.t) / span)) * (W - 2) + 1, tall = e.ev === 'risk' && e.level === 'danger';
+    const r = document.createElementNS(NS, 'rect');
+    r.setAttribute('x', x.toFixed(1)); r.setAttribute('y', tall ? '2' : '11'); r.setAttribute('width', '1.6'); r.setAttribute('height', tall ? '24' : '12'); r.setAttribute('class', 't-' + actTone(e));
+    svg.append(r);
+  });
+  b.append(t, svg);
+  return b;
+}
+const ACT_FILTERS = [['all', 'All'], ['asks', 'Questions'], ['done', 'Finished'], ['risk', 'Risky'], ['sent', 'Sent']];
+const ACT_MATCH = { all: () => true, asks: (e) => e.ev === 'blocked' || e.ev === 'answered', done: (e) => e.ev === 'done', risk: (e) => e.ev === 'risk', sent: (e) => e.ev === 'sent' || e.ev === 'send_failed' };
+function actRow(e) {
+  const r = el('div', 'arow' + (e.open ? ' open' : '')), kind = ACT_KIND[e.ev] || [e.ev, 'dim'];
+  r.dataset.ev = e.ev; r.style.setProperty('--tone', 'var(--' + actTone(e) + ')');
+  const when = new Date(e.t * 1000), today = new Date().toDateString() === when.toDateString();
+  r.append(el('div', 'at', (today ? '' : when.toLocaleDateString([], { weekday: 'short' }) + ' ') + when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })));
+  const m = el('div', 'am'), top = el('div', 'a1');
+  if (e.host && S.q && S.q.hosts.length > 1 && e.ev !== 'stopped') top.append(hostPill(e.host));
+  top.append(el('b', null, e.ev === 'stopped' ? 'Everything stopped' : (e.label || e.host || '')), el('i', null, e.ev === 'stopped' ? '' : kind[0]));
+  m.append(top);
+  // What is shown under it is DATA from the host (a question, your own words, a command an agent ran): text only, always.
+  const more = e.ev === 'blocked' ? e.q : e.ev === 'answered' ? 'after ' + fmtDur(e.wait || 0) : e.ev === 'quiet' ? 'no output for ' + (e.mins || '?') + ' min'
+    : e.ev === 'stopped' ? [e.blocked ? e.blocked + ' waiting' : '', e.done ? e.done + ' finished' : ''].filter(Boolean).join(', ')
+    : e.ev === 'risk' ? shortWhat(e.what) + (e.helper ? ' (a helper)' : '') : (e.ev === 'sent' || e.ev === 'send_failed') ? e.text : e.ev === 'host_down' ? e.why : '';
+  if (more) m.append(el('div', 'a2', more));
+  if (e.ev === 'risk' && e.cmd) m.append(el('div', 'acmd selectable', e.cmd));
+  r.append(m);
+  if (e.open) gesture(r, { tap: () => { closeSheet(); openDetail(e.host, e.pane, 'all'); } });
+  return r;
+}
+function openActivity(since, filter) {
+  const box = el('div'); box.style.cssText = 'display:flex;flex-direction:column;min-height:0';
+  const title = el('h3', null, 'Activity'), sub = el('div', 'sub', since ? 'What happened since you last looked.' : 'What your agents did, newest first. Tap one that is still open to go to it.');
+  const seg = el('div', 'seg actseg'), list = el('div', 'golist actlist'); list.id = 'actlist';
+  let cur = filter || 'all', data = null;
+  const draw = () => {
+    seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.f === cur));
+    list.textContent = '';
+    if (!data) { list.append(el('div', 'empty', 'Reading…')); return; }
+    const hits = data.items.filter(ACT_MATCH[cur]);
+    if (!hits.length) list.append(el('div', 'empty', cur === 'all' ? 'Nothing has happened yet.' : 'Nothing of that kind.'));
+    hits.forEach((e) => list.append(actRow(e)));
+    if (data.watch === false && (cur === 'all' || cur === 'risk')) list.append(el('div', 'dim fine', 'The watch is switched off on this host, so commands are not looked at.'));
+  };
+  ACT_FILTERS.forEach(([f, text]) => { const b = btn(text, 'mini-btn', () => { cur = f; draw(); }); b.dataset.f = f; seg.append(b); });
+  const row = el('div', 'btns'); row.style.marginTop = '8px'; row.append(btn('Close', '', closeSheet));
+  box.append(title, sub, seg, list, row);
+  openSheet(box); draw();
+  api('api/activity?limit=300' + (since ? '&since=' + encodeURIComponent(since) : '')).then((d) => { data = d; if (!since) { ACT.data = d; ACT.at = Date.now(); } draw(); })
+    .catch((e) => { list.textContent = ''; list.append(el('div', 'empty', 'Could not read the activity: ' + e.message)); });
+}
+
+// ---- since you last looked: open the app after a while away and the first thing you see is what changed meanwhile
+const AWAY_MS = 20 * 60000;
+let lookTimer = null;
+function noteLook() { if (!S.catchUp) store.set('shepr.lastLook', Date.now()); }
+function checkAway() {
+  const last = store.get('shepr.lastLook', 0), away = Date.now() - last;
+  if (!S.dev || S.catchUp || !last || away < AWAY_MS) { noteLook(); return; }
+  const since = (last + (S.skew || 0)) / 1000;
+  api('api/activity?limit=300&since=' + encodeURIComponent(since.toFixed(1))).then((d) => {
+    const s = d.summary, n = (s.done || 0) + (s.blocked || 0) + (s.risk || 0) + (s.quiet || 0) + (s.stopped || 0) + (s.host_down || 0);
+    if (!n) { noteLook(); return; }
+    S.catchUp = { since, away, summary: s };
+    if (S.tab === 'waiting' && !S.sheetOpen && !S.cur) paintMain();
+  }).catch(() => noteLook());
+}
+function catchUpCard() {
+  const c = S.catchUp; if (!c) return null;
+  const s = c.summary, n = strip('catchup', 'catchup'), t = el('div', 'st'), chips = el('div', 'cchips');
+  t.append(el('b', null, 'WHILE YOU WERE AWAY · ' + awayWords(c.away)));
+  // The three that matter most, then a count of the rest: the card is a glance, the sheet behind See it has all of it.
+  let shown = 0, rest = 0;
+  const chip = (num, one, many, tone) => { if (!num) return; if (shown >= 3) { rest += 1; return; } shown += 1; const x = el('span', 'cchip', num + ' ' + (num === 1 ? one : many)); x.style.setProperty('--tone', 'var(--' + tone + ')'); chips.append(x); };
+  chip(s.risk_danger, 'risky command', 'risky commands', 'hot'); chip(s.done, 'finished', 'finished', 'ok'); chip(s.blocked, 'new question', 'new questions', 'warn');
+  chip(s.answered, 'answered', 'answered', 'dim'); chip(s.quiet, 'went quiet', 'went quiet', 'warn'); chip(s.stopped, 'full stop', 'full stops', 'hot'); chip(s.host_down, 'host dropped', 'hosts dropped', 'hot');
+  if (rest) { const x = el('span', 'cchip', '+' + rest + ' more'); x.style.setProperty('--tone', 'var(--dim)'); chips.append(x); }
+  t.append(chips);
+  const done = () => { S.catchUp = null; noteLook(); };
+  n.append(t, btn('See it', 'mini-btn', () => { const since = c.since; done(); paintMain(); openActivity(since); }), btn('✕', 'mini-btn dimb x', () => { done(); paintMain(); }));
+  return n;
+}
+function afterQueue() {   // once per good queue read: start the away check on the first one, then keep "last looked" current
+  if (S.lookStarted) return;
+  S.lookStarted = true;
+  checkAway();
+  lookTimer = setInterval(() => { if (!document.hidden) noteLook(); }, 30000);
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && S.lookStarted) checkAway(); else if (document.hidden) noteLook(); });
+
+// ---- who is burning it: each session's share of this host's token use, by Claude Code's own counts (the Subs tab)
+const BURN = { data: null, at: 0, busy: false, span: ['1h', '5h', '24h'].indexOf(store.get('shepr.burnspan', '5h')) >= 0 ? store.get('shepr.burnspan', '5h') : '5h', err: '' };
+const SPAN_WORDS = { '1h': 'the last hour', '5h': 'the last 5 hours', '24h': 'the last 24 hours' };
+function fetchBurn(force) {
+  if (BURN.busy || !S.dev || (!force && Date.now() - BURN.at < 30000)) return;
+  BURN.busy = true;
+  api('api/burn?span=' + BURN.span).then((d) => { BURN.data = d; BURN.err = ''; }).catch((e) => { BURN.err = e.status === 404 ? 'old' : (e.message || 'failed'); })
+    .finally(() => { BURN.busy = false; BURN.at = Date.now(); paintBurn(); if (BURN.data && BURN.data.available && !BURN.data.ready) setTimeout(() => fetchBurn(true), 2500); });
+}
+function burnSpark(series) {
+  const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg'), W = 260, H = 26, n = series.length, bw = W / n;
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H); svg.setAttribute('preserveAspectRatio', 'none'); svg.setAttribute('class', 'bn-spark'); svg.setAttribute('aria-hidden', 'true');
+  series.forEach((v, i) => { const h = Math.max(1, Math.round(v * (H - 2))), r = document.createElementNS(NS, 'rect'); r.setAttribute('x', (i * bw + 0.6).toFixed(1)); r.setAttribute('y', String(H - h)); r.setAttribute('width', (bw - 1.2).toFixed(1)); r.setAttribute('height', String(h)); if (v >= 0.999) r.setAttribute('class', 'peak'); svg.append(r); });
+  return svg;
+}
+function burnCard() {
+  const card = el('div', 'bn'); card.id = 'burncard';   // looks like a subscription card, but is not one: `.sc` means a plan card.style.setProperty('--tone', 'var(--accent)'); card.style.setProperty('--i', 7);
+  const head = el('div', 'sc-h'), chips = el('div', 'bn-spans');
+  ['1h', '5h', '24h'].forEach((sp) => { const b = btn(sp, 'bn-span' + (BURN.span === sp ? ' on' : ''), () => { BURN.span = sp; store.set('shepr.burnspan', sp); BURN.data = null; paintBurn(); fetchBurn(true); }); b.dataset.span = sp; chips.append(b); });
+  head.append(el('span', 'sc-n', SPAN_WORDS[BURN.span]), chips); card.append(head);
+  const d = BURN.data, say = (t) => card.append(el('div', 'sc-l wrap plain', t));
+  if (BURN.err === 'old') { say('This host runs an older Shepr that does not measure this yet. Restart Shepr on the host.'); return card; }
+  if (!d) { say(BURN.err ? 'Could not read it: ' + BURN.err : 'Reading the sessions on this host…'); return card; }
+  if (!d.available) { say(d.reason || 'Not measured on this host.'); return card; }
+  if (!d.ready) { say('Reading the sessions on ' + (d.host || 'this host') + '…'); return card; }
+  if (!d.rows.length) { say('No Claude session on ' + (d.host || 'this host') + ' used any tokens in ' + SPAN_WORDS[d.span] + '.'); return card; }
+  const g = el('div', 'bn-g'); g.append(burnSpark(d.series || [])); card.append(g);
+  const top = d.rows[0].share || 1;
+  d.rows.forEach((r) => {
+    const row = el('div', 'bn-r' + (r.open ? ' open' : '')), nm = el('span', 'bn-n'), bar = el('span', 'sc-bar'), fill = el('i'), tx = el('span', 'sc-rt');
+    row.dataset.sid = r.sid;
+    nm.append(el('b', null, r.label), el('i', 'bn-m ' + r.model, r.model));
+    fill.style.width = Math.max(2, Math.round(r.share / top * 100)) + '%'; bar.append(fill);
+    tx.textContent = Math.round(r.share * 100) + '%';
+    const sub = el('span', 'bn-s', fmtTok(r.out) + ' out · ' + fmtTok(r.ctx) + ' read · ' + r.replies + (r.replies === 1 ? ' reply' : ' replies') + (r.helpers >= 0.1 ? ' · ' + Math.round(r.helpers * 100) + '% helpers' : '') + (r.open ? '' : ' · closed'));
+    row.append(nm, bar, tx, sub);
+    if (r.open) gesture(row, { tap: () => { closeSheet(); openDetail(r.host, r.pane, 'all'); } });
+    card.append(row);
+  });
+  if (d.others && d.others.n) card.append(el('div', 'sc-note', d.others.n + ' more ' + (d.others.n === 1 ? 'session' : 'sessions') + ': ' + Math.round(d.others.share * 100) + '% between them.'));
+  card.append(el('div', 'sc-note', d.sessions + (d.sessions === 1 ? ' session' : ' sessions') + ' on ' + (d.host || 'this host') + ' in ' + SPAN_WORDS[d.span] + ', ' + fmtTok(d.out) + ' tokens written. A share is an estimate from Claude Code’s own counts; other machines are not counted.'));
+  return card;
+}
+function paintBurn() { const old = $('burncard'); if (old && old.parentNode) old.replaceWith(burnCard()); }
+function whoBtn() {
+  const b = btn('WHO \u203a', 'who', (e) => { e.stopPropagation(); openBurn(); }); b.id = 'burnbtn';
+  b.setAttribute('aria-label', 'Who is burning it: each session\u2019s share of the tokens used'); return b;
+}
+function whoStrip() {
+  const b = btn('', 'ledger', openBurn), t = el('div', 'lt'); b.id = 'burnbtn';
+  t.append(el('div', 'l1', 'WHO IS BURNING IT'), el('div', 'l2', 'each Claude session\u2019s share of the tokens used on this host')); b.append(t); return b;
+}
+function openBurn() {
+  const box = el('div'); box.style.cssText = 'display:flex;flex-direction:column;min-height:0';
+  const list = el('div', 'golist bnlist'); list.append(burnCard());   // the one part that scrolls, in its own box
+  const row = el('div', 'btns'); row.style.marginTop = '8px'; row.append(btn('Close', '', closeSheet));
+  box.append(el('h3', null, 'Who is burning it'), el('div', 'sub', 'Each Claude session\u2019s share of the tokens used on this host. Tap one that is still open to go to it.'), list, row);
+  openSheet(box); fetchBurn(true);
+}
+
+// ---- changes: what git says about the project a session runs in (this machine only). Read only.
+const CHG_MARK = { M: 'changed', A: 'added', D: 'deleted', R: 'renamed', C: 'copied', U: 'conflict', '?': 'new' };
+function openChanges() {
+  if (!S.cur) return;
+  const at = { host: S.cur.host, pane: S.cur.pane }, q = 'host=' + encodeURIComponent(at.host) + '&pane=' + encodeURIComponent(at.pane);
+  const box = el('div'); box.style.cssText = 'display:flex;flex-direction:column;min-height:0';
+  const title = el('h3', null, 'Changes'), sub = el('div', 'sub', 'What git says about this project. Nothing here changes anything.'), body = el('div', 'chg'); body.id = 'chg';
+  const row = el('div', 'btns'); row.style.marginTop = '8px';
+  const back = btn('‹ Files', '', () => list()), close = btn('Close', '', closeSheet); back.hidden = true; row.append(back, close);
+  box.append(title, sub, body, row);
+  let data = null;
+  const fail = (e) => { body.textContent = ''; body.append(el('div', 'empty', e.message)); };
+  const list = () => {
+    back.hidden = true; body.textContent = ''; body.className = 'chg';
+    const d = data; if (!d) { body.append(el('div', 'empty', 'Reading…')); return; }
+    if (!d.git) { title.textContent = d.folder; sub.textContent = 'This folder is not a git project, so there is nothing to compare.'; return; }
+    title.textContent = d.folder;
+    const pills = el('div', 'chg-p');
+    pills.append(el('span', 'pill ' + (d.detached ? 'warn' : ''), d.detached ? 'detached' : d.branch));
+    if (d.ahead) pills.append(el('span', 'pill warn', d.ahead + ' not pushed'));
+    if (d.behind) pills.append(el('span', 'pill', d.behind + ' behind'));
+    if (d.upstream == null && !d.detached) pills.append(el('span', 'pill', 'no upstream'));
+    pills.append(el('span', 'pill ' + (d.files.length ? 'warn' : 'ok'), d.files.length ? (d.files.length + d.more) + (d.files.length + d.more === 1 ? ' file changed' : ' files changed') : 'clean'));
+    sub.textContent = d.files.length ? '+' + d.added + ' −' + d.deleted + ' lines not committed. Tap a file to read its changes.' : 'Nothing uncommitted.';
+    body.append(pills);
+    const files = el('div', 'golist chg-f'); files.id = 'chgfiles';
+    d.files.forEach((f) => {
+      const r = el('div', 'crow'), code = f.untracked ? '?' : (f.x !== ' ' ? f.x : f.y);
+      r.dataset.path = f.path;
+      r.append(el('span', 'cx c-' + (code === '?' ? 'new' : code), CHG_MARK[code] || code), el('span', 'cp', f.path),
+               el('span', 'cn', f.add == null && f.del == null ? '' : '+' + (f.add || 0) + ' −' + (f.del || 0)));
+      gesture(r, { tap: () => diff(f.path) });
+      files.append(r);
+    });
+    if (d.more) files.append(el('div', 'dim fine', 'and ' + d.more + ' more files.'));
+    if (d.files.length) body.append(files);
+    if (d.commits.length) {
+      body.append(el('div', 'sec', 'Latest commits'));
+      const cl = el('div', 'golist chg-c');
+      d.commits.forEach((c) => { const r = el('div', 'crow com' + (c.unpushed ? ' un' : '')); r.append(el('span', 'ch', c.h.slice(0, 7)), el('span', 'cp', c.s), el('span', 'cn', c.unpushed ? 'not pushed' : agoText(c.t).replace(' ago', ''))); cl.append(r); });
+      body.append(cl);
+    }
+  };
+  const diff = (path) => {
+    back.hidden = false; body.textContent = ''; body.className = 'chg diffing';
+    sub.textContent = path;
+    const pre = el('div', 'dview selectable'); pre.id = 'dview'; pre.append(el('div', 'empty', 'Reading…')); body.append(pre);
+    api('api/changes/diff?' + q + '&path=' + encodeURIComponent(path)).then((r) => {
+      pre.textContent = '';
+      if (r.binary) { pre.append(el('div', 'empty', 'A binary file: nothing to read.')); return; }
+      if (!r.text) { pre.append(el('div', 'empty', 'No text changes to show.')); return; }
+      // Each line is DATA from a file on the host: text only. The first character decides its colour, nothing else is read from it.
+      r.text.split('\n').forEach((l) => { pre.append(el('div', 'dl ' + (l[0] === '+' ? 'add' : l[0] === '-' ? 'del' : l.slice(0, 2) === '@@' ? 'hunk' : ''), l || ' ')); });
+      if (r.truncated) pre.append(el('div', 'dim fine', 'Cut here: the rest is too long for a phone.'));
+    }).catch(fail);
+  };
+  openSheet(box); list();
+  api('api/changes?' + q).then((d) => { data = d; list(); }).catch(fail);
+}
+
 // ---- notifications: the host pushes "something changed", the service worker asks what and shows it
 const pushOK = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 const keyBytes = (b64) => { const s = atob(b64.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - b64.length % 4) % 4)); return Uint8Array.from(s, (c) => c.charCodeAt(0)); };
@@ -927,6 +1220,7 @@ function loadPush() {
 async function pushOn() {
   try {
     if (!S.push) await loadPush();
+    if (!S.push) throw new Error('the host did not answer');
     const perm = await Notification.requestPermission();
     if (perm !== 'granted') { notify('Notifications are blocked for Shepr. Turn them on in the iPhone Settings, under Notifications.', true); paintMain(); return; }
     const reg = await navigator.serviceWorker.ready;
@@ -960,7 +1254,8 @@ function notifyCard() {
   }
   const row = (label, key) => { const r = el('label', 'chk'); const cb = el('input'); cb.type = 'checkbox'; cb.checked = !!S.push.prefs[key]; cb.addEventListener('change', () => pushPref(key, cb.checked));
     const m = el('div', 'meta'); m.append(el('div', 'ttl', label)); r.append(cb, m); return r; };
-  c.append(row('An agent is waiting on me', 'blocked'), row('An agent finished', 'done'));
+  c.append(row('An agent is waiting on me', 'blocked'), row('An agent finished', 'done'), row('Everything has stopped', 'stopped'),
+           row('An agent has gone quiet (' + ((S.q && S.q.quiet_min) || 15) + ' min with no output)', 'quiet'), row('An agent ran something risky', 'risk'));
   if (S.push.last) {   // what the push service said to the last push: "accepted" means Apple has it, so a silent phone is a phone setting
     const L = S.push.last, ok = L.code >= 200 && L.code < 300;
     c.append(el('p', 'dim', 'Last push ' + new Date(L.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + ' (' + L.why + '): Apple answered ' + L.code + (ok ? ', so it reached Apple. If nothing showed, check Focus (the moon or bed icon) and Settings, Notifications, Shepr.' : '. It did not go through.')));
@@ -972,7 +1267,7 @@ function notifyCard() {
 }
 function updateBadge() {
   if (!('setAppBadge' in navigator)) return;
-  const n = waiting().length;
+  const n = agents().filter((a) => a.status === 'blocked').length;   // every host: a filter on the Queue must not shrink the badge
   (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => { /* needs notification permission */ });
 }
 if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'open' && e.data.host && S.dev) openDetail(e.data.host, e.data.pane, 'all'); });
@@ -1011,7 +1306,7 @@ function hostRow(h) {
   const r = el('div', 'hrow');
   const m = el('div', 'meta');
   const counts = Object.keys(h.counts || {}).map((k) => h.counts[k] + ' ' + k).join(', ');
-  m.append(el('div', 'ttl', h.id + (h.kind === 'local' ? ' · this machine' : '')),
+  m.append(el('div', 'ttl', h.id + (h.kind === 'local' ? ' · this machine' : h.kind === 'session' ? ' · a herdr session here' : '')),
            el('div', 'sub' + (h.status !== 'ok' && h.enabled ? ' bad' : ''), h.status === 'ok' ? (counts || 'no sessions') : !h.enabled ? 'saved, switched off'
              : ((h.error || 'not answering').slice(0, 90) + (h.last_ok ? '  \u00b7  last seen ' + agoText(h.last_ok) : '  \u00b7  not seen since Shepr started'))));
   r.append(m);
@@ -1131,7 +1426,7 @@ function setPhones(b) {
     H.devices.forEach((d) => {
       const r = el('div', 'hrow'); const mm = el('div', 'meta');
       mm.append(el('div', 'ttl', d.name + (d.you ? ' (this phone)' : '')),
-                el('div', 'sub', d.fp.slice(0, 20) + '… · seen ' + (d.last_seen ? clock(d.last_seen) : 'never')));
+                el('div', 'sub', d.fp.slice(0, 20) + '… · seen ' + (d.last_seen ? agoText(d.last_seen) : 'never')));
       r.append(mm);
       if (H.writes) r.append(btn('Revoke', 'mini-btn bad', () => prepare({ kind: 'device_revoke', id: d.id })));
       box.append(r);
@@ -1467,6 +1762,7 @@ function showPlan(plan) {
   box.append(el('h3', null, plan.approves ? 'This approves it. Send?' : isWake ? 'Wake these sessions?' : isStart ? 'Wake this project?' : isNew ? 'Start this new project?' : isOpen ? 'Open this project?' : isHost ? 'Make this change?' : 'Send this?'),
              el('div', 'sub', [t.host, t.title, t.pane].filter(Boolean).join(' · ') + (t.status ? ' · ' + (STATE_LABEL[t.status] || t.status) : '')));
   if (plan.approves) box.append(el('div', 'warnbox', 'The option you picked reads like an approval. Check it is what you mean.'));
+  if (plan.risk) { const rb = el('div', 'warnbox risk', 'What it allows looks like: ' + shortWhat(plan.risk.what).toUpperCase() + '. Read the command before you send.'); rb.id = 'planrisk'; box.append(rb); }
   const kv = el('div', 'kv selectable');
   plan.lines.forEach((l) => { kv.append(el('div', 'k', l.k), el('div', 'v', l.v)); });
   box.append(kv);
@@ -1474,7 +1770,7 @@ function showPlan(plan) {
   // WHY: the sheet appears under the thumb that just tapped Send in the dock. A short dead time
   // stops a double-tap or a late touch from confirming something nobody has read yet.
   go.disabled = true;
-  sheetTimer = setTimeout(() => { go.disabled = false; }, 700);
+  sheetTimer = setTimeout(() => { go.disabled = false; }, plan.risk ? 2500 : 700);   // a risky approval gets time to be read
   const row = el('div', 'btns');
   row.append(btn('Cancel', '', closeSheet), go);
   box.append(row);
@@ -1598,9 +1894,18 @@ const MODELS = [['fable', 'Fable'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['ha
 const EFFORTS = [['low', 'low'], ['medium', 'medium'], ['high', 'high'], ['xhigh', 'xhigh'], ['max', 'max']];
 // What the session says it is running, read off the screen: the status line ("Opus 5.5·high") or the banner ("Opus 5.5 with high effort").
 function currentModel() {
-  const t = $('tail').textContent || '', all = (re) => { let m, last = null; const g = new RegExp(re.source, 'gi'); while ((m = g.exec(t))) last = m; return last; };
-  const a = all(/\b(Fable|Opus|Sonnet|Haiku)\b[^\n·]{0,8}·\s*(low|medium|high|xhigh|max)\b/), b = all(/\b(Fable|Opus|Sonnet|Haiku)\b [\d.]+ with (low|medium|high|xhigh|max) effort/), m = a || b;
+  const find = (t) => {
+    const all = (re) => { let m, last = null; const g = new RegExp(re.source, 'gi'); while ((m = g.exec(t))) last = m; return last; };
+    return all(/\b(Fable|Opus|Sonnet|Haiku)\b[^\n·]{0,8}·\s*(low|medium|high|xhigh|max)\b/) || all(/\b(Fable|Opus|Sonnet|Haiku)\b [\d.]+ with (low|medium|high|xhigh|max) effort/);
+  };
+  // The status line is in the live text at the bottom. Only when it is not there is the whole scroll (megabytes, in a long session) searched.
+  const live = $('live'), m = (live && find(live.textContent || '')) || find($('tail').textContent || '');
   return m ? { model: m[1].toLowerCase(), effort: m[2].toLowerCase() } : null;
+}
+function paintChangesBtn(a) {
+  const b = $('dchanges'); if (!b) return;
+  const h = a && S.q && S.q.hosts.find((x) => x.id === a.host);
+  b.hidden = !(h && h.kind === 'local');   // the files are on the machine Shepr runs on: that is the only place git can be asked
 }
 function paintModelChip(a) {
   const b = $('dmodel'); if (!b) return;
@@ -1623,6 +1928,7 @@ function openModelSheet() {
   openSheet(box);
 }
 $('dmodel').addEventListener('click', openModelSheet);
+$('dchanges').addEventListener('click', openChanges);
 
 function paintDetailChrome() {
   if (!S.cur) return;
@@ -1641,7 +1947,7 @@ function paintDetailChrome() {
     $('dstate').textContent = 'GONE'; $('dstate').className = 'state';
   }
   if (a && a.status === 'done') seenStore.mark(S.cur.host + '|' + S.cur.pane, a.seq);   // you are looking at it
-  paintModelChip(a);
+  paintModelChip(a); paintChangesBtn(a);
   $('dpos').textContent = i >= 0 ? (i + 1) + '/' + l.length : '–/' + l.length;
   $('dprev').disabled = !(l.length && (i > 0 || (i < 0 && S.idx > 0)));
   $('dnext').disabled = !(l.length && (i >= 0 ? i < l.length - 1 : S.idx < l.length));
@@ -1849,7 +2155,7 @@ function loadTail(force) {
       paintDock(); paintDetailChrome();
     })
     .catch((e) => {
-      if (S.cur && S.cur.pane === at.pane) {
+      if (S.cur && S.cur.pane === at.pane && S.cur.host === at.host) {
         if (sessionMissing(e)) { closeDetail(); notify('That session is gone.', false); return; }
         $('tail').textContent = e.code === 'bad_host' ? 'That host is not reachable.' : 'Could not read this session: ' + e.message;
         S.agent = null; paintDock();
@@ -2564,10 +2870,10 @@ async function boot() {
   } else {
     if (S.hello) await fetchQueue(true); else { fetchQueue(true); paintMain(); }   // host unreachable: show that now, keep trying behind it
     // A link like #gus/w4E:p1 opens that session directly.
-    const m = hash.match(/^([^/]+)\/(w[0-9A-Za-z]+:p[0-9A-Za-z]+)$/);
+    const m = hash.match(/^(.+)\/(w[0-9A-Za-z]+:p[0-9A-Za-z]+)$/);
     if (m) openDetail(m[1], m[2], 'all');
   }
   hideSplash(false);
 }
 boot();
-window.shepr = { S, ping, fetchQueue, standalone, signHeaders, renderBlocks, appIsStale, BUILD, liveCut, syncHistory, prepareUpload, loadLedger, fmtDur, paceLive, budgetVerdict, drafts, prefs, PREFS, currentModel, seenStore, isSeen, finished, finishedSeen, paintMain, paintHostbar, budgetGuidance, hostRow, paintTailAge, subCard };
+window.shepr = { openBurn, ACT, BURN, isQuiet, fmtTok, awayWords, checkAway, noteLook, openActivity, openChanges, burnCard, fetchBurn, loadActivity, safeRender, S, ping, fetchQueue, standalone, signHeaders, renderBlocks, appIsStale, BUILD, liveCut, syncHistory, prepareUpload, loadLedger, fmtDur, paceLive, budgetVerdict, drafts, prefs, PREFS, currentModel, seenStore, isSeen, finished, finishedSeen, paintMain, paintHostbar, budgetGuidance, hostRow, paintTailAge, subCard };

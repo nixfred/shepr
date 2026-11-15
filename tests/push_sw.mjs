@@ -36,6 +36,19 @@ check('lock screen: a session that finished AGAIN after you opened it (new seq) 
 check('lock screen: no usable record of what you opened (missing, null, a list, a string) behaves as before', [undefined, null, [], 'x'].every((x) => say(two, x).title === '2 agents finished'));
 const d5 = say({ agents: [ag('w1:p1', 'blocked', 4, 'alpha'), ag('w2:p1', 'done', 9, 'bravo')] }, { 'gus|w1:p1': { seq: 4 } });
 check('lock screen: a waiting session is always announced, opened or not', d5.title === 'alpha is waiting on you' && d5.count === 1);
+// v49: the push is empty, so the host says (in the queue the worker fetches) what it pushed for, and the wording follows that. Still names and
+// Shepr's own labels only: never a command, never a conversation title.
+const w = (why, agents) => say({ agents, pushed: { why }, quiet_min: 15 }, {});
+const risky = Object.assign(ag('w1:p1', 'working', 2, 'alpha'), { risk: { level: 'danger', what: 'discarded local changes (git reset --hard)', t: 1 } });
+const r1 = w('risk', [risky, ag('w2:p1', 'blocked', 4, 'bravo')]);
+check('lock screen: a risky command is announced by project and by Shepr\'s own label, never by the command', r1.title === 'alpha ran something risky' && r1.body === 'discarded local changes' && r1.count === 1 && !/reset --hard/.test(JSON.stringify([r1.title, r1.body])));
+check('lock screen: a risky command from a session that is no longer open still says where to look', w('risk', [ag('w2:p1', 'done', 4, 'bravo')]).title === 'An agent ran something risky');
+const s1 = w('blocked+stopped', [ag('w1:p1', 'blocked', 4, 'alpha'), ag('w2:p1', 'done', 9, 'bravo'), ag('w3:p1', 'idle', 1, 'charlie')]);
+check('lock screen: everything stopping says so, with how many wait and how many finished', s1.title === 'Everything has stopped' && s1.body === '1 waiting on you, 1 finished' && s1.target.pane === 'w1:p1');
+check('lock screen: ...but not when something is working again by the time the phone asks', w('stopped', [ag('w1:p1', 'blocked', 4, 'alpha'), ag('w3:p1', 'working', 1, 'charlie')]).title === 'alpha is waiting on you');
+const q1 = w('quiet', [Object.assign(ag('w1:p1', 'working', 2, 'alpha'), { quiet_s: 17 * 60 }), Object.assign(ag('w2:p1', 'working', 2, 'bravo'), { quiet_s: 60 })]);
+check('lock screen: an agent gone quiet is named, with for how long', q1.title === 'alpha has gone quiet' && q1.body === 'No output for 17 minutes.' && q1.target.pane === 'w1:p1');
+check('lock screen: a push for the usual reasons reads as it always did', w('blocked', [ag('w1:p1', 'blocked', 4, 'alpha')]).title === 'alpha is waiting on you' && say({ agents: [ag('w1:p1', 'blocked', 4, 'alpha')] }, {}).title === 'alpha is waiting on you');
 if (process.env.SW_ONLY) { process.exit(res.every(Boolean) ? 0 : 1); }
 
 const b = await chromium.launch({ executablePath: '/usr/bin/chromium', args: ['--no-sandbox'] });
@@ -62,7 +75,8 @@ await p.screenshot({ path: '/tmp/claude-1000/shots/n1-notify-card.png' });
 await p.click('#pushon'); await p.waitForSelector('#notifycard .chk', { timeout: 8000 });
 const cfg = await p.evaluate(async () => { const S = window.shepr.S; return { c: S.push, key: window.__subKey }; });
 check('subscribing sends the host\'s VAPID key to the browser (65 bytes, uncompressed) and the host stores the subscription', cfg.key.length === 65 && cfg.key[0] === 4 && cfg.c.subscribed);
-check('the card then shows the two choices, "waiting on me" on and "finished" off', (await p.$$eval('#notifycard .chk input', (n) => n.map((x) => x.checked))).join() === 'true,false');
+check('the card then shows the five choices: "waiting on me" on, and finished, everything stopped, gone quiet and ran something risky off until asked for', (await p.$$eval('#notifycard .chk input', (n) => n.map((x) => x.checked))).join() === 'true,false,false,false,false'
+  && /Everything has stopped/.test(await p.textContent('#notifycard')) && /gone quiet \(15 min/.test(await p.textContent('#notifycard')) && /ran something risky/.test(await p.textContent('#notifycard')));
 await p.screenshot({ path: '/tmp/claude-1000/shots/n2-notify-on.png' });
 await p.click('#notifycard .chk:nth-of-type(2) input'); await p.waitForTimeout(500);
 check('turning on "finished" is saved on the host', (await p.evaluate(() => window.shepr.S.push.prefs)).done === true);

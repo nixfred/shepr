@@ -2,7 +2,7 @@
    Goal: when the tailnet is unreachable, the user sees YOUR app with YOUR message,
    not Safari's error page. It is NOT a general offline database. */
 
-const VERSION = 'shepr-v48';
+const VERSION = 'shepr-v49';
 // The app shell: everything needed to paint a useful screen with no network.
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png'];
 
@@ -114,6 +114,21 @@ function swDescribe(q, seen) {
   const name = (a) => a.wlabel || a.project || 'a session';
   const list = (l) => { const n = [...new Set(l.map(name))]; return n.slice(0, 3).join(', ') + (n.length > 3 ? ' +' + (n.length - 3) : ''); };
   const blocked = q.agents.filter((a) => a.status === 'blocked'), done = q.agents.filter((a) => a.status === 'done' && unread(a));
+  // The push itself is empty, so the host says (in the queue this worker just fetched) what it pushed for. The watch's news comes first,
+  // because the usual "N agents are waiting" would hide it. Still names and our own labels only: never a command, never a title.
+  const why = (q.pushed && q.pushed.why) || '', badge = blocked.length;
+  if (/risk/.test(why)) {
+    const r = q.agents.filter((a) => a.risk && a.risk.level === 'danger');
+    return r.length ? { title: name(r[0]) + ' ran something risky', body: String(r[0].risk.what || '').replace(/\s*\(.*$/, '') + (r.length > 1 ? ' (and ' + (r.length - 1) + ' more)' : ''), target: r[0], count: badge }
+                    : { title: 'An agent ran something risky', body: 'Open Shepr, then Activity, to see what.', target: null, count: badge };
+  }
+  if (/stopped/.test(why) && !q.agents.some((a) => a.status === 'working') && (blocked.length || done.length)) {
+    return { title: 'Everything has stopped', body: [blocked.length ? blocked.length + ' waiting on you' : '', done.length ? done.length + ' finished' : ''].filter(Boolean).join(', '), target: blocked[0] || done[0], count: badge };
+  }
+  if (/quiet/.test(why)) {
+    const lim = (q.quiet_min || 15) * 60, qs = q.agents.filter((a) => a.status === 'working' && a.quiet_s >= lim);
+    if (qs.length) return { title: qs.length === 1 ? name(qs[0]) + ' has gone quiet' : qs.length + ' agents have gone quiet', body: qs.length === 1 ? 'No output for ' + Math.round(qs[0].quiet_s / 60) + ' minutes.' : list(qs), target: qs[0], count: badge };
+  }
   if (blocked.length) return { title: blocked.length === 1 ? name(blocked[0]) + ' is waiting on you' : blocked.length + ' agents are waiting on you', body: list(blocked), target: blocked[0], count: blocked.length };
   if (done.length) return { title: done.length === 1 ? name(done[0]) + ' finished' : done.length + ' agents finished', body: list(done), target: done[0], count: 0 };
   return { title: 'Shepr', body: 'Nothing is waiting on you now.', target: null, count: 0 };
