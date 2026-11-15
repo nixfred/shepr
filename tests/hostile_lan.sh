@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Can a machine that is NOT on your tailnet reach a Shepr that serves the tailnet itself (server.py PORT --tailnet)?
+# (It asks the same of any port: give it the port of anything else this host serves on its tailnet address.)
 #
 # It should not: the listener is tied to the Tailscale interface (SO_BINDTODEVICE), so a packet for the node's tailnet
 # address that arrives over any other interface finds nothing listening. This script plays that other machine. It makes a
@@ -7,7 +8,7 @@
 # cable, and from inside tries two ports on each address (IPv4, and IPv6 when the node has one):
 #
 #   a control port, opened here on that same address but tied to no interface   must ANSWER  (so a refusal means something)
-#   the Shepr port                                                               must be REFUSED
+#   the port under test (Shepr's by default)                                     must be REFUSED
 #
 #   tests/hostile_lan.sh [PORT]        PORT defaults to 8742. Needs root for the namespace (it asks sudo), Linux, iproute2.
 #
@@ -122,12 +123,12 @@ one() { # family address
   fi
   s=$(try "$ip" "$PORT")
   o=$(own "$ip" "$PORT")
-  echo "  IPv$fam $ip   control port $ctl: $c   |   the Shepr port $PORT: $s   |   the Shepr port from this machine itself: ${o%% *}"
+  echo "  IPv$fam $ip   control port $ctl: $c   |   port $PORT: $s   |   port $PORT from this machine itself: ${o%% *}"
   if [ "${c%% *}" != open ]; then echo "  IPv$fam INCONCLUSIVE: the control port did not answer either, so something here stops the packet before any socket is asked."; return; fi
-  if [ "${o%% *}" != open ]; then echo "  IPv$fam INCONCLUSIVE: nothing listens on that address and port even from this machine. Is Shepr running with --tailnet on port $PORT?"; return; fi
+  if [ "${o%% *}" != open ]; then echo "  IPv$fam INCONCLUSIVE: nothing listens on that address and port even from this machine. Is the service up on port $PORT (Shepr: started with --tailnet)?"; return; fi
   case "$s" in
-    refused|timeout) echo "  IPv$fam PASS: the packet that reached the control port found no Shepr."; proven=$((proven + 1)) ;;
-    *) echo "  IPv$fam FAIL: the Shepr port answered a machine that is not on the tailnet."; verdict=1 ;;
+    refused|timeout) echo "  IPv$fam PASS: the packet that reached the control port found nothing on port $PORT."; proven=$((proven + 1)) ;;
+    *) echo "  IPv$fam FAIL: port $PORT answered a machine that is not on the tailnet."; verdict=1 ;;
   esac
 }
 echo "From a namespace on a private cable ($NET4.2), which is not on the tailnet:"
@@ -135,4 +136,4 @@ one 4 "$IP4"
 if [ -n "$IP6" ]; then one 6 "$IP6"; else echo "  IPv6: this node has no tailnet IPv6 address (or this machine no IPv6): not tried"; fi
 if [ "$verdict" = 1 ]; then echo "FAIL"; exit 1; fi
 if [ "$proven" = 0 ]; then echo "INCONCLUSIVE: nothing was proven."; exit 2; fi
-echo "PASS: Shepr answers on the Tailscale interface only ($proven address(es) proven)."
+echo "PASS: port $PORT answers on the Tailscale interface only ($proven address(es) proven)."
