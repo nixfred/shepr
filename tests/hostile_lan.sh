@@ -16,7 +16,8 @@
 # That rule names that one interface, which only this test can reach. It is removed with everything else when the script
 # ends, however it ends, short of kill -9 (then: ip netns del sheprlan<pid>; ip link del vsh<pid>a; and the iptables and
 # ip6tables rule for that interface). Python runs isolated (-I: nothing is imported from the folder you stand in) and, for
-# everything that does not need root, as the user who called sudo. Tailscale and Shepr are never touched.
+# everything that does not need root, as the user who called sudo. The control listeners answer one word, are ended with
+# the script, and end by themselves after 90 seconds whatever happens. Tailscale and Shepr are never touched.
 set -euo pipefail
 PORT=${1:-8742}
 if [ "$(id -u)" != 0 ]; then exec sudo -n "$0" "$@"; fi
@@ -36,7 +37,8 @@ IP6=$(tailscale ip -6 2>/dev/null | head -1 || true)
 if ip -o addr | grep -q " $NET4\."; then echo "$NET4.0/30 is in use here: edit NET4 in this script"; exit 2; fi
 
 read -r -d '' PY_CONTROL <<'PY' || true
-import socket, sys
+import signal, socket, sys
+signal.alarm(90)   # it ends by itself, whatever becomes of the script that started it
 addr = sys.argv[1]
 s = socket.socket(socket.AF_INET6 if ":" in addr else socket.AF_INET)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -76,12 +78,11 @@ cleanup() {
   rm -rf "$WORK"
 }
 trap cleanup EXIT
-control() { # address -> the port a control listener was opened on, for that address on every interface
-  local f="$WORK/port.$RANDOM"
-  ${AS[@]+"${AS[@]}"} python3 -I -c "$PY_CONTROL" "$1" > "$f" &
+control() { # address file: opens a control listener on that address, tied to no interface; its port lands in the file.
+  # Called plainly, never inside $( ): the listener's PID has to reach PIDS in THIS shell, or cleanup cannot end it.
+  ${AS[@]+"${AS[@]}"} python3 -I -c "$PY_CONTROL" "$1" > "$2" 2>/dev/null &
   PIDS+=("$!")
-  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$f" ] && break; sleep 0.2; done
-  head -1 "$f"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$2" ] && break; sleep 0.2; done
 }
 try() { ip netns exec "$NS" ${AS[@]+"${AS[@]}"} python3 -I -c "$PY_TRY" "$1" "$2"; }
 own() { ${AS[@]+"${AS[@]}"} python3 -I -c "$PY_TRY" "$1" "$2"; }
@@ -109,7 +110,8 @@ proven=0
 one() { # family address
   local fam=$1 ip=$2 ctl c s o tool=iptables
   [ "$fam" = 6 ] && tool=ip6tables
-  ctl=$(control "$ip")
+  control "$ip" "$WORK/port.$fam"
+  ctl=$(head -1 "$WORK/port.$fam" 2>/dev/null || true)
   [ -n "$ctl" ] || { echo "  IPv$fam: the control listener did not start"; return; }
   c=$(try "$ip" "$ctl")
   if [ "${c%% *}" != open ] && command -v "$tool" >/dev/null; then
