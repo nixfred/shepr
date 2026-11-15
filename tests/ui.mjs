@@ -11,7 +11,7 @@ if (!pw) { console.error('playwright not found: npm i -g playwright, or set PW_P
 const { chromium, devices } = pw;
 
 const OUT = '/tmp/claude-1000/shots'; fs.mkdirSync(OUT, { recursive: true });
-const BASE = 'http://localhost:8743';
+const BASE = process.env.SHEPR_TEST_BASE || 'http://localhost:8743';   // SHEPR_TEST_BASE=https://<node>.<tailnet>.ts.net:8743 runs it over a --tailnet listener
 const SERVER = new URL('../server.py', import.meta.url).pathname;
 const ENV = { ...process.env, SHEPR_STATE: process.env.SHEPR_STATE || '/tmp/claude-1000/shepr-state', SHEPR_URL: BASE,
               HERDR_SOCKET_PATH: process.env.HERDR_SOCKET_PATH || '/home/pi/.config/herdr/sessions/hrtest/herdr.sock' };

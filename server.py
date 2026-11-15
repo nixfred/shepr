@@ -4,10 +4,13 @@
 Static files, /ping, and a small /api that fronts the `herdr` CLI so a phone can see which agent
 sessions are waiting on a human, read the tail of one, and answer it. Standard library only.
 
-    python3 server.py [port] [--bind ADDR]
+    python3 server.py [port] --tailnet      the host serves: its own TLS on this node's tailnet addresses
+    python3 server.py [port] [--bind ADDR]  loopback only, for a `tailscale serve` (or a proxy of your own) in front
 
-Listens on 127.0.0.1 by default. `nixweb serve|install` puts `tailscale serve` in front of it,
-which adds HTTPS and exposes it to the tailnet and nowhere else.
+With --tailnet the server listens on 127.0.0.1 (plain HTTP, for this machine) and on the node's own tailnet addresses,
+bound to the Tailscale interface, with the certificate `tailscale cert` hands out, and it asks `tailscale whois` whose
+device is on the other end of every connection before it reads a byte from it. Without it, it listens on loopback only
+and trusts the Tailscale-User-Login header that `tailscale serve` adds.
 
 The rules this file exists to keep:
 
@@ -21,15 +24,18 @@ The rules this file exists to keep:
 """
 import argparse
 import base64
+import calendar
 import concurrent.futures
 import contextlib
 import email.header
+import errno
 import fcntl
 import functools
 import glob
 import hashlib
 import hmac
 import io
+import ipaddress
 import json
 import os
 import re
@@ -37,7 +43,10 @@ import secrets
 import shlex
 import shutil
 import socket
+import socketserver
+import ssl
 import stat
+import struct
 import subprocess
 import sys
 import threading
@@ -91,7 +100,8 @@ def clean_tail(text):
 LOCK = threading.RLock()
 SNAP = {"ts": 0.0, "hosts": [], "agents": [], "polls": 0}
 PLANS = {}
-OWNER = {"login": None, "dns": None, "names": {"localhost", "127.0.0.1", "[::1]"}}
+LOOPBACK_NAMES = frozenset({"localhost", "127.0.0.1", "[::1]"})
+OWNER = {"login": None, "dns": None, "names": set(LOOPBACK_NAMES), "ips": []}
 
 
 class HerdrError(Exception):
@@ -3245,6 +3255,7 @@ def learn_tailnet(quiet=False):
         OWNER["dns"] = dns
         OWNER["login"] = OWNER["login"] or login   # a login already known (SHEPR_OWNER, an earlier answer) is never replaced
         OWNER["names"].add(dns)
+        OWNER["ips"] = [ip for ip in (norm_ip(x) for x in (me.get("TailscaleIPs") or [])) if ip]   # what --tailnet listens on
     except Exception as e:
         if not quiet:
             print(f"shepr: tailscale identity unavailable ({e!r}); tailnet requests are refused until it is known (it is asked again every few seconds)", file=sys.stderr, flush=True)
@@ -3300,8 +3311,12 @@ def write_server_json(port):
     """What `shepr pair` and `shepr status` read to find this server. Written only once the port is really ours."""
     os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
     tmp = state_path("server.json.tmp")
+    d = {"pid": os.getpid(), "port": port, "url": public_url(port), "started": int(time.time())}
+    if TAILNET["on"]:   # the server takes tailnet connections itself: which addresses answer, and why not when they do not
+        d["front"] = {"mode": "tailnet", "listening": list(TAILNET["listening"]), "dev": TAILNET["dev"], "dead": TAILNET["dead"],
+                      "error": TAILNET["error"], "tls_until": TAILNET["tls_until"], "keepalive": KEEPALIVE}
     with open(tmp, "w") as f:
-        json.dump({"pid": os.getpid(), "port": port, "url": public_url(port), "started": int(time.time())}, f)
+        json.dump(d, f)
     os.replace(tmp, state_path("server.json"))
 
 
@@ -3320,6 +3335,302 @@ def header_login(v):
 ALLOW_PROXY = os.environ.get("SHEPR_ALLOW_PROXY") == "1"   # your own reverse proxy in front, which decides who may connect
 
 
+# --------------------------------------------------------------------------------------------
+# serving the tailnet itself (`server.py PORT --tailnet`): nothing in front, no `tailscale serve`
+# --------------------------------------------------------------------------------------------
+# The server then listens on this node's own tailnet addresses as well as on loopback. Three things replace what
+# `tailscale serve` used to do:
+#   * the listener is tied to the Tailscale interface (SO_BINDTODEVICE), so a packet for that address that arrives over the
+#     LAN finds nothing listening;
+#   * it speaks TLS itself, with the certificate `tailscale cert` hands out for this node's name;
+#   * it asks `tailscale whois` whose device is on the other end of every connection BEFORE it reads a byte from it. The
+#     node's owner on one of their own devices gets a TLS handshake. A tagged device, another tailnet user or an address
+#     Tailscale does not know is closed without a word.
+# A header that names a user (Tailscale-User-Login) is `tailscale serve`'s to set. On a direct connection anyone could type
+# it, so it is not read there.
+TAILNET = {"on": False, "listening": [], "dev": None, "error": None, "tls_until": None, "dead": True}
+KEEPALIVE = os.environ.get("SHEPR_KEEPALIVE", "1") != "0"   # a phone keeps its TLS connection between requests; 0: one request per connection
+TAILNET_DEV = os.environ.get("SHEPR_TAILNET_DEV") or None   # name the interface instead of finding the one that holds the address
+HANDSHAKE_SECS = 10      # the whole TLS handshake, however the bytes trickle
+FIRST_SECS = 10          # a new connection must begin its first request within this
+IDLE_SECS = 45           # a kept connection that stays silent this long is closed
+KEEP_HINT_S = 30         # what the phone is told (Keep-Alive: timeout=): less than IDLE_SECS, so it lets go first and never sends into a closing connection
+LINGER_SECS = 30         # an answer that went out before the request's body was read: the rest of that body is taken in for this long,
+LINGER_IDLE = 5          # for this long without a byte of it,
+LINGER_MAX = 2 * UPLOAD_MAX   # and for this many bytes at most. Then the connection is closed, whatever is still coming.
+IDLE_SLOTS = threading.BoundedSemaphore(24)   # connections that may sit idle at once (of 48 in all); past that an answer says Connection: close
+WHO_OK_S, WHO_NO_S, WHO_ERR_S = 120.0, 30.0, 3.0   # how long an answer from `tailscale whois` is believed: the owner, somebody else, no answer
+CERT_EVERY_S = 12 * 3600.0   # Tailscale is asked for the certificate again this often; it renews it when it is close to running out
+FRONT_TICK_S = 5.0
+WHOIS_SECS = 4           # how long `tailscale whois` may take before the connection it is asked about is closed
+SIOCGIFADDR = 0x8915     # Linux: the IPv4 address of an interface
+WHO, WHO_LOCKS, REFUSED, WHO_LOCK = {}, {}, {}, threading.Lock()
+
+
+class Refused(ConnectionError):
+    """A tailnet connection that is not the owner on one of their own devices. Nothing was read from it, nothing is said to it."""
+
+
+class ClientGone(ConnectionError):
+    """The other end went away while it was being answered. There is no one left to tell."""
+
+
+class TlsError(Exception):
+    """The certificate could not be had, in words a person can act on."""
+
+
+def norm_ip(s):
+    try:
+        return ipaddress.ip_address(str(s).split("%", 1)[0]).compressed
+    except ValueError:
+        return ""
+
+
+def iface_addrs():
+    """{address: interface} for this machine, straight from the kernel: an ioctl per interface for IPv4, /proc for IPv6.
+    Linux only. Anywhere else it is empty, and a tailnet listener is then bound by address alone."""
+    out = {}
+    try:
+        names = [n for _, n in socket.if_nameindex()]
+    except OSError:
+        return out
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for n in names:
+            try:
+                out[socket.inet_ntoa(fcntl.ioctl(s.fileno(), SIOCGIFADDR, struct.pack("256s", n[:15].encode()))[20:24])] = n
+            except OSError:
+                continue   # an interface with no IPv4 address
+    finally:
+        s.close()
+    try:
+        with open("/proc/net/if_inet6") as f:
+            for line in f:
+                p = line.split()
+                if len(p) == 6:
+                    out[socket.inet_ntop(socket.AF_INET6, bytes.fromhex(p[0]))] = p[5]
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def tcp_shutdown(sock, how):
+    """Shut the TCP connection under a socket, TLS or plain. Not sock.shutdown(): on a TLS socket that drops the TLS state
+    first, and anything another thread wrote in that instant would go out unencrypted."""
+    socket.socket.shutdown(sock, how)
+
+
+def ts_whois(ip):
+    """Who Tailscale says is at a tailnet address: {"login", "node", "tagged"}. None when it knows no such peer. Raises
+    OSError, ValueError or subprocess.TimeoutExpired when it cannot be asked."""
+    r = subprocess.run(["tailscale", "whois", "--json", ip], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=WHOIS_SECS)
+    if r.returncode != 0:
+        return None
+    w = json.loads(r.stdout)
+    node, prof = (w.get("Node"), w.get("UserProfile")) if isinstance(w, dict) else (None, None)
+    if not isinstance(node, dict) or not isinstance(prof, dict):
+        raise ValueError("whois answered in a shape Shepr does not know")   # nobody is let in on a guess
+    login = str(prof.get("LoginName") or "").strip().lower()
+    name = re.sub(r"[^\w.@ -]", "", str(node.get("ComputedName") or node.get("Name") or ""))[:64]   # it goes into the journal: no line breaks, no escapes
+    return {"login": login, "node": name, "tagged": bool(node.get("Tags")) or login == "tagged-devices"}
+
+
+def owner_login():
+    """The login this server answers to, or None. "tagged-devices" is what Tailscale calls the user of a node that has none:
+    it is never an owner, or every tagged device on the tailnet would be one."""
+    o = OWNER.get("login")
+    return o if o and o != "tagged-devices" else None
+
+
+def is_owner(who):
+    return bool(who and not who["tagged"] and owner_login() and who["login"] == owner_login())
+
+
+def whois_cached(ip):
+    """ts_whois, remembered for a while, and asked once at a time per address (a phone opens six connections at once)."""
+    now = time.monotonic()
+    with WHO_LOCK:
+        hit = WHO.get(ip)
+        if hit and hit[0] > now:
+            return hit[1]
+        if len(WHO) > 512:   # never more than the tailnet has nodes, in practice
+            WHO.clear(); WHO_LOCKS.clear()
+        one = WHO_LOCKS.setdefault(ip, threading.Lock())
+    with one:
+        with WHO_LOCK:
+            hit = WHO.get(ip)
+            if hit and hit[0] > time.monotonic():
+                return hit[1]
+        try:
+            who = ts_whois(ip)
+            ttl = WHO_ERR_S if who is None else (WHO_OK_S if is_owner(who) else WHO_NO_S)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            who, ttl = None, WHO_ERR_S
+        with WHO_LOCK:
+            WHO[ip] = (time.monotonic() + ttl, who)
+        return who
+
+
+def admit(ip):
+    """(who, None) for the owner on one of their own devices. (None, why) for everybody else."""
+    if not owner_login():
+        return None, "this server does not know its owner yet"
+    who = whois_cached(ip)
+    if not who:
+        return None, "Tailscale knows no such peer"
+    if who["tagged"]:
+        return None, f"{who['node'] or 'that node'} is a tagged device, which has no user"
+    if who["login"] != owner_login():
+        return None, f"{who['node'] or 'that node'} belongs to another tailnet user"
+    return who, None
+
+
+def note_refused(ip, why):
+    """One journal line per address every ten minutes: enough to see who knocked, never a flood."""
+    now = time.monotonic()
+    with WHO_LOCK:
+        if now - REFUSED.get(ip, -1e9) < 600:
+            return
+        if len(REFUSED) > 512:
+            REFUSED.clear()
+        REFUSED[ip] = now
+    print(f"shepr: refused a tailnet connection from {ip}: {why}", file=sys.stderr, flush=True)
+
+
+def serve_in_front(port):
+    """True when `tailscale serve` is set up for this port on this node, False when it is not, None when that cannot be told.
+    tailscaled takes tailnet traffic for a port it serves before the kernel ever sees it. With such an entry left behind,
+    phones would still go through it (and reach the loopback listener), whatever is bound here."""
+    try:
+        r = subprocess.run(["tailscale", "serve", "status", "--json"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=6)
+        d = json.loads(r.stdout or "{}")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    tcp = d.get("TCP") if isinstance(d, dict) else None
+    return str(port) in tcp if isinstance(tcp, dict) else False
+
+
+def declared_body(headers):
+    """The length of a request's body as its headers declare it, or None when they do not declare it plainly (chunked, two
+    lengths, not a number). A connection is only reused after a request whose every byte was read, so None means: close."""
+    if headers.get("Transfer-Encoding"):
+        return None
+    cl = headers.get_all("Content-Length") or []
+    if not cl:
+        return 0
+    if len(cl) != 1 or not re.fullmatch(r"[0-9]{1,12}", cl[0].strip()):
+        return None
+    return int(cl[0])
+
+
+def cert_not_after(pem):
+    """When the first certificate in a PEM text runs out (seconds since 1970), or None. A walk over its DER by hand: the
+    standard library only reads that date off a live connection."""
+    m = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", pem or "", re.S)
+    if not m:
+        return None
+    try:
+        der = ssl.PEM_cert_to_DER_cert(m.group(0))
+
+        def tlv(i):   # one element at i: its tag, where its value starts, where it ends
+            tag, n, i = der[i], der[i + 1], i + 2
+            if n & 0x80:
+                k = n & 0x7F
+                n, i = int.from_bytes(der[i:i + k], "big"), i + k
+            return tag, i, i + n
+        _, i, _ = tlv(0)             # Certificate
+        _, i, _ = tlv(i)             # tbsCertificate
+        tag, s, e = tlv(i)
+        if tag == 0xA0:              # [0] version; the serial number follows it
+            tag, s, e = tlv(e)
+        for _ in range(3):           # over the serial number, the signature algorithm and the issuer: now at validity
+            tag, s, e = tlv(e)
+        _, _, nb_end = tlv(s)        # notBefore
+        tag, a, b = tlv(nb_end)      # notAfter
+        t = der[a:b].decode("ascii")
+        if tag == 0x17:              # UTCTime has a two-digit year
+            t = ("20" if t[:2] < "50" else "19") + t
+        return calendar.timegm(time.strptime(t[:14], "%Y%m%d%H%M%S"))
+    except Exception:
+        return None
+
+
+def tls_files(dns):
+    d = state_path("tls")
+    return d, os.path.join(d, dns + ".crt"), os.path.join(d, dns + ".key")
+
+
+def make_tls(crt, key):
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(crt, key)   # also proves the key belongs to the certificate
+    ctx.set_alpn_protocols(["http/1.1"])
+    return ctx
+
+
+def read_text(path):
+    try:
+        with open(path, errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def saved_cert(dns):
+    """(TLS context, when it runs out) from the certificate an earlier run kept, or None. It lets a server that starts before
+    Tailscale is answering (a boot, a tailscaled restart) open its door at once instead of waiting to ask."""
+    _, crt, key = tls_files(dns)
+    until = cert_not_after(read_text(crt))
+    if not until or until < time.time() + 60:
+        return None
+    try:
+        return make_tls(crt, key), until
+    except (OSError, ssl.SSLError):
+        return None
+
+
+def fetch_cert(dns):
+    """Ask Tailscale for this node's certificate and key and keep them in the state directory, owner-only. Returns
+    (TLS context, when it runs out). tailscaled holds the certificate and renews it when it is close to running out, so asking
+    again twice a day is how it stays fresh here with nothing restarting. The key is never printed, logged or sent anywhere.
+    Raises TlsError."""
+    d, crt, key = tls_files(dns)
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
+    except OSError as e:
+        raise TlsError(f"cannot make {d} ({e.strerror or e})")
+    new_c, new_k = crt + ".new", key + ".new"
+    for p in (new_c, new_k):
+        with contextlib.suppress(OSError):
+            os.remove(p)
+    try:
+        r = subprocess.run(["tailscale", "cert", "--cert-file", new_c, "--key-file", new_k, dns], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=180)
+    except FileNotFoundError:
+        raise TlsError("the tailscale command is not installed here")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise TlsError(f"`tailscale cert` did not answer ({e.__class__.__name__})")
+    if r.returncode != 0 or not (os.path.isfile(new_c) and os.path.isfile(new_k)):
+        said = [l.strip() for l in (r.stderr or r.stdout or "").splitlines() if l.strip()]
+        msg = CTRL_RE.sub("", said[-1])[:200] if said else f"exit {r.returncode}"
+        low, fix = msg.lower(), ""
+        if "denied" in low or "must be root" in low:
+            fix = " Fix: sudo tailscale set --operator=$USER"
+        elif "https" in low:
+            fix = " Fix: turn on HTTPS certificates for your tailnet (the DNS page of the Tailscale admin console)"
+        raise TlsError(f"`tailscale cert {dns}` failed: {msg.rstrip('.')}.{fix}")
+    try:
+        os.chmod(new_k, 0o600)
+        ctx = make_tls(new_c, new_k)   # before it replaces the pair in use
+    except (OSError, ssl.SSLError) as e:
+        raise TlsError(f"the certificate Tailscale returned could not be loaded ({e.__class__.__name__})")
+    until = cert_not_after(read_text(new_c))
+    os.replace(new_k, key)
+    os.replace(new_c, crt)
+    return ctx, until
+
+
 # Whole-request deadlines. A socket timeout alone is not enough: it restarts on every receive, so a caller who sends one
 # byte every few seconds never trips it and can hold a connection (and one of the 48 slots) for days. These are wall-clock
 # limits for the whole of one phase, enforced by closing the socket from a timer, so a blocked read is cut off however
@@ -3333,11 +3644,31 @@ BODY_SLOTS = threading.BoundedSemaphore(16)   # bodies being read before their s
 class Handler(SimpleHTTPRequestHandler):
     server_version = "shepr"
     timeout = 20   # a client that stops reading our answer, or sits idle, is dropped instead of holding a thread forever
+    # An answer is its headers and then its body. Sent as two small writes, the second waits for the phone to acknowledge the
+    # first (Nagle), and the phone waits before acknowledging (delayed ACK): measured from a second machine, 110 ms for a
+    # request that needed 35. So: no Nagle, and a JSON answer leaves in one write (flush_headers).
+    disable_nagle_algorithm = True
 
     def setup(self):
+        self._dog, self._cut, self._unread, self._took, self._parsed, self._n, self._slot = None, False, 0, 0, False, 0, False
+        self._who = self._ip = None
+        self._tailnet = bool(getattr(self.server, "tailnet", False))
+        if self._tailnet:
+            # Whose device is this? Tailscale is asked before a byte is read from the connection, and before any TLS.
+            ip = self._ip = norm_ip(self.client_address[0])
+            who, why = admit(ip)
+            ctx = self.server.front.ctx
+            if not who or ctx is None:
+                note_refused(ip, why or "there is no certificate to answer with yet")
+                raise Refused(why or "no certificate")
+            self._who = who
+            self.request.settimeout(HANDSHAKE_SECS)   # one deadline for the whole handshake, however it trickles
+            self.request = ctx.wrap_socket(self.request, server_side=True)
+            if KEEPALIVE:
+                self.protocol_version = "HTTP/1.1"
         super().setup()
-        self._dog, self._cut, self._unread = None, False, 0
-        self.arm(HEADER_SECS)
+        if not self._tailnet:
+            self.arm(HEADER_SECS)   # a tailnet connection's clock starts when its request does (handle_one_request)
 
     def arm(self, secs):
         """Close this connection if the current phase has not finished in `secs` seconds, however the bytes trickle."""
@@ -3347,7 +3678,7 @@ class Handler(SimpleHTTPRequestHandler):
         def fire():
             self._cut = True
             try:
-                sock.shutdown(socket.SHUT_RDWR)   # wakes a read that is blocked in recv
+                tcp_shutdown(sock, socket.SHUT_RDWR)   # wakes a read that is blocked in recv
             except OSError:
                 pass
         self._dog = threading.Timer(secs, fire)
@@ -3367,13 +3698,37 @@ class Handler(SimpleHTTPRequestHandler):
         if self._unread > 0 and not self._cut:
             try:
                 self.wfile.flush()
-                self.connection.shutdown(socket.SHUT_WR)
-                self.arm(2)
-                self.rfile.read(min(self._unread, 16384))
+                tcp_shutdown(self.connection, socket.SHUT_WR)
+                if self._tailnet:
+                    self.linger()
+                else:
+                    self.arm(2)
+                    self.rfile.read(min(self._unread, 16384))
             except (OSError, ValueError):
                 pass
             self.disarm()
+        if self._slot:   # an answer promised to keep the connection and something then went wrong: the place is given back
+            self._slot = False
+            IDLE_SLOTS.release()
         super().finish()
+        if self._tailnet:   # the TLS socket is this handler's: the server only holds the plain one it accepted
+            with contextlib.suppress(OSError):
+                self.connection.close()
+
+    def linger(self):
+        """An answer went out before the request's body was read (a refusal). Over HTTP/1.1 a browser reads the answer only
+        once it has sent the whole request, and a connection closed under an upload is reset, which loses the answer: the
+        phone would say it cannot reach the host where the host said "this phone is not paired". So what is left of the
+        body is taken in and thrown away, within limits. (`tailscale serve` hid this: it spoke HTTP/2 to the phone, which
+        can tell a sender to stop.)"""
+        left = min(self._unread, LINGER_MAX)
+        self.arm(LINGER_SECS)
+        self.connection.settimeout(LINGER_IDLE)
+        while left > 0:
+            got = self.rfile.read1(min(left, 65536))
+            if not got:
+                break
+            left -= len(got)
 
     def parse_request(self):
         ok = super().parse_request()
@@ -3381,7 +3736,63 @@ class Handler(SimpleHTTPRequestHandler):
         if self._cut:   # the headers were cut off by the deadline: half a request is not answered
             self.close_connection = True
             return False
+        self._parsed = bool(ok)
         return ok
+
+    def await_request(self):
+        """Wait, saying nothing, for the next request on a tailnet connection. False when there will be none: the phone
+        closed it, or it sat silent long enough. No journal line either way: this is how every connection ends."""
+        first = self._n == 0
+        if first:
+            self._slot = IDLE_SLOTS.acquire(blocking=False)
+        elif not self._slot:
+            return False   # the last answer already said Connection: close
+        secs = IDLE_SECS if not first else (FIRST_SECS if self._slot else HEADER_SECS)
+        try:
+            self.connection.settimeout(secs)
+            return bool(self.rfile.peek(1))
+        except (OSError, ValueError):
+            return False
+        finally:
+            if self._slot:
+                self._slot = False
+                IDLE_SLOTS.release()
+            with contextlib.suppress(OSError):
+                self.connection.settimeout(self.timeout)
+
+    def reusable(self):
+        """May this connection carry another request after the one being answered? Only when every byte of this one was
+        read. What is left of an unread body would be taken for the next request, and whoever can make the phone's
+        browser send a POST here (any web page can) could put a whole request of their own choosing inside it."""
+        if not (self._tailnet and self._parsed) or self._cut or self.close_connection:
+            return False
+        n = declared_body(self.headers)
+        return n is not None and self._took == n
+
+    def handle_one_request(self):
+        if not self._tailnet:
+            return super().handle_one_request()   # loopback: one request per connection, timed from accept, as it always was
+        if not self.await_request():
+            self.close_connection = True
+            return
+        if self._n:
+            # A kept connection: is it still the owner's device? A phone that keeps asking could otherwise hold one open for
+            # hours past the day its node was tagged or handed to somebody else. The answer is remembered for two minutes,
+            # so Tailscale itself is rarely asked.
+            who, why = admit(self._ip)
+            if not who:
+                note_refused(self._ip, why)
+                self.close_connection = True
+                return
+        self._unread, self._took, self._parsed = 0, 0, False
+        self.arm(HEADER_SECS)
+        try:
+            super().handle_one_request()
+        finally:
+            self.disarm()
+        self._n += 1
+        if not self.reusable():
+            self.close_connection = True
 
     def log_message(self, fmt, *args):
         if len(args) < 2 or str(args[1]) not in ("200", "304"):   # a one-argument message (a timeout) has no status to look at
@@ -3395,36 +3806,70 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Permissions-Policy", "camera=(self), microphone=(), geolocation=()")
         # Static files: always revalidate (they carry Last-Modified, so this is cheap) so Safari's own cache
         # never serves an old app.js that the service worker's network-first rule would have refreshed.
-        if not any(h.lower().startswith(b"cache-control") for h in getattr(self, "_headers_buffer", [])):
+        buf = getattr(self, "_headers_buffer", [])
+        if not any(h.lower().startswith(b"cache-control") for h in buf):
             self.send_header("Cache-Control", "no-cache")
+        # A tailnet connection is kept for the next request only when this one was read to its last byte and there is room
+        # among the idle ones. The answer says which, so the phone never sends its next request into a closing connection.
+        if (getattr(self, "_tailnet", False) and self.protocol_version >= "HTTP/1.1" and buf and b" 100 " not in buf[0][:16]
+                and not any(h.lower().startswith(b"connection:") for h in buf)):
+            if self.reusable() and (self._slot or IDLE_SLOTS.acquire(blocking=False)):
+                self._slot = True
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Keep-Alive", f"timeout={KEEP_HINT_S}")
+            else:
+                self.send_header("Connection", "close")
         super().end_headers()
+
+    def flush_headers(self):
+        if hasattr(self, "_headers_buffer"):
+            self.wfile.write(b"".join(self._headers_buffer) + self.__dict__.pop("_tail", b""))   # headers and a waiting body, one write
+            self._headers_buffer = []
 
     def json_out(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self._tail = body   # leaves with the headers, in the same write
+            self.end_headers()
+            rest = self.__dict__.pop("_tail", None)
+            if rest:   # an HTTP/0.9 request gets no headers, so nothing carried the body out
+                self.wfile.write(rest)
+        except OSError as e:   # the phone went away mid-answer (a reset, its TLS torn down, it stopped reading)
+            self.close_connection = True
+            raise ClientGone(e.__class__.__name__) from None
+        finally:
+            self.__dict__.pop("_tail", None)
 
     def network_gate(self, post):
         """Layer 1: is this request even from the right place? Returns the tailnet login or 'local'."""
         raw = self.headers.get("Host") or ""
         host = "[::1]" if raw.startswith("[") else raw.rsplit(":", 1)[0].lower()
-        if host not in OWNER["names"]:
+        # A connection this server took from the tailnet itself (--tailnet): `tailscale whois` already said, before anything
+        # was read, that it is the owner on one of their own devices. It is addressed by the tailnet name, never by a
+        # loopback one.
+        direct = getattr(self, "_who", None)
+        if host not in (OWNER["names"] - LOOPBACK_NAMES if direct else OWNER["names"]):
             self.json_out(421, {"error": "bad_host", "message": "unexpected Host header" if tailnet_known() else
                                 "this host does not know its tailnet name yet (is Tailscale connected on it?)"}); return None
         if self.headers.get("Tailscale-Funnel-Request"):
             self.json_out(403, {"error": "funnel", "message": "public funnel traffic is refused"}); return None
-        login = header_login(self.headers.get("Tailscale-User-Login"))
-        if login and login != OWNER["login"]:
-            self.json_out(403, {"error": "not_owner", "message": "this app answers only to the node's owner"}); return None
+        if direct:
+            login = direct["login"]   # Tailscale-User-Login is not read here: nothing but the caller could have set it
+        else:
+            login = header_login(self.headers.get("Tailscale-User-Login"))
+            if login and login != OWNER["login"]:
+                self.json_out(403, {"error": "not_owner", "message": "this app answers only to the node's owner"}); return None
         # `tailscale serve` names the user of every request it forwards, except for a node that HAS no user: a tagged
         # device. Such a request arrives with the proxy's X-Forwarded headers and no login, and used to be taken for a
-        # process on this machine. Only a direct loopback caller has neither.
-        if not login and not ALLOW_PROXY and (self.headers.get("X-Forwarded-For") or self.headers.get("X-Forwarded-Host")):
-            self.json_out(403, {"error": "not_owner", "message": "this request came through a proxy with no tailnet user on it "
+        # process on this machine. Only a direct loopback caller has neither. On a direct tailnet connection the same
+        # headers mean a proxy on one of the owner's own devices is passing somebody else's request along.
+        if (direct or not login) and not ALLOW_PROXY and (self.headers.get("X-Forwarded-For") or self.headers.get("X-Forwarded-Host")):
+            self.json_out(403, {"error": "not_owner", "message": "this request was passed along by a proxy on one of your own devices (see SHEPR_ALLOW_PROXY)"
+                                if direct else "this request came through a proxy with no tailnet user on it "
                                 "(a tagged device, or a reverse proxy of your own: see SHEPR_ALLOW_PROXY)"}); return None
         if post:
             origin = self.headers.get("Origin")
@@ -3454,20 +3899,23 @@ class Handler(SimpleHTTPRequestHandler):
                 self.arm(UPLOAD_SECS if u.path == "/api/upload" else BODY_SECS)
                 try:
                     raw = self.rfile.read(n)
+                except OSError:   # a reset, a stall past the socket's own timeout, TLS torn down: the same as a short read
+                    raw = b""
                 finally:
                     self.disarm()
                     BODY_SLOTS.release()
                 if self._cut or len(raw) < n:   # too slow, or the sender went away: there is no one to answer
                     self.close_connection = True
                     return
-                self._unread = 0
+                self._unread, self._took = 0, n
             body = json.loads(raw) if post and u.path != "/api/upload" else {}
             if post and not isinstance(body, dict):
                 raise HerdrError("bad_request", "body must be an object")
 
             if u.path == "/api/hello" and not post:
                 # The one request every launch makes first: worth a journal line, it is how you see a phone arrive.
-                print(f"shepr: hello from {net} build={(self.headers.get('X-Shepr-Build') or '?')[:12]} ({(self.headers.get('User-Agent') or '')[:70]})", file=sys.stderr, flush=True)
+                via = f" on {self._who['node']}" if getattr(self, "_who", None) and self._who["node"] else ""   # which of the owner's devices, when Tailscale said
+                print(f"shepr: hello from {net}{via} build={(self.headers.get('X-Shepr-Build') or '?')[:12]} ({(self.headers.get('User-Agent') or '')[:70]})", file=sys.stderr, flush=True)
                 return self.json_out(200, {"app": "shepr", "v": 1, "name": LOCAL, "t": time.time(),
                                            "paired": bool(devices()), "writes": not READONLY, "build": shell_build(), "server_build": BOOT_BUILD})
             if u.path == "/api/pair" and post:
@@ -3574,7 +4022,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self.json_out(404, {"error": "not_found", "message": u.path})
         except HerdrError as e:
             return self.json_out(http_status(e.code), {"error": e.code, "message": e.message})
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ClientGone):
             raise   # the phone went away mid-answer: there is no one to tell
         except Exception as e:
             # A commit that fails half way may have typed something: say so, whatever the failure was. Everything else that is
@@ -3733,7 +4181,8 @@ def tailscale_problem():
 # Lines in a unit's journal that say nothing about WHY it is failing: systemd's own bookkeeping, sudo's, and this server's routine news.
 UNIT_NOISE = re.compile(r"^(?:Start(?:ed|ing) |Stopp(?:ed|ing) |Consumed |pam_unix|\S+ : .*COMMAND=|.*Scheduled restart job|.*Failed with result|"
                         r".*Control process exited|.*Main process exited|.*Failed to start |.*: Start request repeated|"
-                        r"shepr: (?:serving|hello|send|tailnet scan|push|paired|tailscale identity learned) |\d+\.\d+\.\d+\.\d+ - - \[)")
+                        r"shepr: (?:serving|hello|send|tailnet scan|push|paired|tailscale identity learned|refused a tailnet connection) |"
+                        r"[0-9a-f:.]+ - - \[)")
 
 
 def unit_trouble(names=None):
@@ -3797,7 +4246,9 @@ RestartSec=5
 
 
 def boot_safe(name):
-    """True when the unit (with its drop-ins) waits for Tailscale and has no start limit, so a reboot brings it back."""
+    """True when a reboot brings the unit back. One that serves the tailnet itself (--tailnet) does: the server waits for
+    Tailscale inside, and nothing else has to succeed first. One that needs `tailscale serve` does only when it (with its
+    drop-ins) waits for Tailscale and has no start limit."""
     paths = [os.path.join(_unit_dir(), name + ".service")]
     paths += sorted(glob.glob(os.path.join(_unit_dir(), name + ".service.d", "*.conf")))
     lines = []
@@ -3807,9 +4258,19 @@ def boot_safe(name):
                 lines += [l.strip() for l in f if not l.lstrip().startswith(("#", ";"))]
         except OSError:
             continue
-    waits = any(l.startswith("ExecStartPre=") and "tailscale wait" in l for l in lines)
+    def setting(key):   # systemd's rule for a list setting: an empty assignment forgets everything before it
+        vals = []
+        for l in lines:
+            k, eq, v = l.partition("=")
+            if eq and k.strip() == key:
+                vals = vals + [v.strip()] if v.strip() else []
+        return vals
+    itself = ((any(re.search(r"(?:^|\s)--tailnet(?:\s|$)", v) for v in setting("ExecStart"))
+               or any(re.search(r"(?:^|[\s\"'])SHEPR_TAILNET=1(?:$|[\s\"'])", v) for v in setting("Environment")))
+              and not any("tailscale serve" in v for v in setting("ExecStartPre") + setting("ExecStartPost")))
+    waits = any("tailscale wait" in v for v in setting("ExecStartPre"))
     nolimit = any(re.fullmatch(r"StartLimitIntervalSec\s*=\s*(0|infinity)", l) for l in lines)
-    return waits and nolimit
+    return itself or (waits and nolimit)
 
 
 def cli_fix_boot(a):
@@ -3950,6 +4411,10 @@ def cli_pair(a):
         if ut:   # systemd is already trying to start it and failing: "start it" would be no help at all
             sys.exit("shepr: the server is not running here: " + unit_trouble_text(ut) + f".\nSee it all: journalctl --user -u {ut['unit']} -n 40")
         sys.exit("shepr: the server is not running here. Start it first: " + unit_hint())
+    front = info.get("front") if isinstance(info.get("front"), dict) else None
+    if front and (front.get("dead") or not front.get("listening")):   # the server is up, but no phone can reach it: say so before showing a code that cannot work
+        print("shepr: warning: phones cannot reach this server right now: "
+              + str(front.get("error") or "its tailnet listener is not up yet"), file=sys.stderr, flush=True)
     code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(12))
     shown = "-".join(code[i:i + 4] for i in range(0, 12, 4))
     ttl = max(30, min(900, a.ttl))
@@ -4015,6 +4480,8 @@ def cli_status(a):
     out = {"build": BOOT_BUILD, "running": bool(info), "url": (info or {}).get("url"), "devices": len(devices()),
            "units": unit_names(), "herdr": False, "counts": {}, "waiting": []}
     out["boot_unsafe"] = [n for n in out["units"] if not boot_safe(n)]
+    front = (info or {}).get("front")
+    out["front"] = front if isinstance(front, dict) else None   # a server that takes tailnet connections itself (--tailnet): what answers, or why not
     ts = None if info else tailscale_problem()
     out["tailscale"] = f"{ts[0]}. Fix: {ts[1]}" if ts else None   # only asked when the server is down
     out["unit_error"] = None if info else unit_trouble(out["units"])   # likewise: systemd is asked only when there is something to explain
@@ -4047,6 +4514,16 @@ def cli_status(a):
         print(json.dumps(out), flush=True)
         return 0
     print(f"shepr {BOOT_BUILD}: " + (f"running at {out['url']}" if out["running"] else f"not running. Start it: {unit_hint()}"))
+    if out["front"]:
+        f = out["front"]
+        if f.get("listening"):
+            print("  serves the tailnet itself on " + ", ".join(str(x) for x in f["listening"]) + (f" ({f['dev']})" if f.get("dev") else "")
+                  + (f", certificate good until {day(f['tls_until'])}" if f.get("tls_until") else ""))
+        if f.get("error"):
+            print("  warning: " + ("phones cannot reach it, the tailnet listener is not up: " if not f.get("listening") else
+                                   "phones cannot reach it: " if f.get("dead") else "") + str(f["error"]))
+        elif not f.get("listening"):
+            print("  warning: phones cannot reach it yet, the tailnet listener is not up")
     if out["tailscale"]:
         print(f"  warning: {out['tailscale']}. Shepr needs it to start")
     if out["unit_error"]:
@@ -4147,6 +4624,186 @@ class CappedServer(ThreadingHTTPServer):
         finally:
             self._slots.release()
 
+    def handle_error(self, request, client_address):
+        # The other end went away, stalled, never finished its TLS handshake, or was not let in: the ordinary life of a
+        # phone on a mobile network, and nothing to fix here. Anything else is a mistake of ours and keeps its traceback.
+        if isinstance(sys.exc_info()[1], (ConnectionError, ssl.SSLError, TimeoutError, socket.timeout)):   # (socket.timeout: its own class before Python 3.10)
+            return
+        super().handle_error(request, client_address)
+
+
+class TailnetServer(CappedServer):
+    """One of this node's tailnet addresses. The TLS handshake is done in the connection's own thread (Handler.setup), so a
+    slow one holds that thread and never the accept loop."""
+    tailnet = True
+    request_queue_size = 64
+
+    def __init__(self, addr, handler, dev=None, front=None):
+        self.address_family = socket.AF_INET6 if ":" in addr[0] else socket.AF_INET
+        self.dev, self.front = dev, front
+        super().__init__(addr, handler)
+
+    def server_bind(self):
+        if self.dev:
+            opt = getattr(socket, "SO_BINDTODEVICE", None)
+            if opt is None:
+                raise OSError("this system cannot tie a socket to an interface")
+            self.socket.setsockopt(socket.SOL_SOCKET, opt, self.dev.encode() + b"\0")
+        if self.address_family == socket.AF_INET6:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        # TCPServer's bind, not HTTPServer's: that one looks the address up in DNS for a name nobody reads (getfqdn), and
+        # a reverse lookup of a tailnet address can hang for seconds while Tailscale is half up.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[0], self.server_address[1]
+
+
+def bind_words(ip, port, dev, e):
+    if e.errno == errno.EADDRINUSE:
+        return (f"port {port} is already taken on {ip}. If `tailscale serve` is still set up for it, take that down: "
+                f"tailscale serve --https={port} off")
+    if e.errno in (errno.EPERM, errno.EACCES):
+        return f"this user may not tie a socket to {dev} (that needs Linux 5.7 or newer)"
+    return f"cannot listen on {ip} port {port}: {e.strerror or e}"
+
+
+def day(t):
+    return time.strftime("%Y-%m-%d", time.gmtime(t)) if t else "an unknown date"
+
+
+class Front:
+    """Keeps a TLS listener on each of this node's tailnet addresses, whatever Tailscale does underneath. It waits for the
+    node's name and its certificate, so a boot where Tailscale is slow no longer fails the unit. It binds again when the
+    interface is made anew (tailscaled restarted: a socket tied to the old interface would listen for nothing, for ever).
+    And it asks for the certificate again twice a day. One thread, one pass every few seconds; a pass that finds nothing
+    changed is a few system calls and starts no process."""
+
+    def __init__(self, port, handler):
+        self.port, self.handler = port, handler
+        self.ctx, self.until = None, None
+        self.srv = {}                    # tailnet address -> (its server, (interface, that interface's index))
+        self.cert_next = self.learn_next = 0.0
+        self.learn_tries = 0
+        self.ts_said = self.cert_err = self.bind_err = None
+        self.binds = 0                   # listeners made so far: a new one is news for the journal even when nothing else changed
+        self.proxied, self.serve_next = None, 0.0   # is `tailscale serve` still set up for this port, and when to look again
+        self.told = None
+
+    def ask_cert(self, now):
+        try:
+            self.ctx, self.until = fetch_cert(OWNER["dns"])
+            self.cert_err, self.cert_next = None, now + CERT_EVERY_S
+        except TlsError as e:
+            self.cert_err = str(e)
+            self.cert_next = now + (30.0 if self.ctx is None else 900.0)   # with nothing to serve on, soon; else in a quarter of an hour
+
+    def close(self, ip):
+        s, _ = self.srv.pop(ip)
+        try:
+            s.shutdown()
+            s.server_close()
+        except OSError:
+            pass
+
+    def listen(self, addrs, up):
+        want = {}
+        if self.ctx is not None:
+            for ip in up:
+                dev = TAILNET_DEV or addrs.get(ip)
+                try:
+                    want[ip] = (dev, socket.if_nametoindex(dev) if dev else 0)
+                except OSError:
+                    continue   # the interface went away between two looks: the next pass sees it
+        for ip in [ip for ip, (_, key) in self.srv.items() if want.get(ip) != key]:
+            self.close(ip)     # its address or its interface is gone, or is not the one it was bound to
+        self.bind_err = None
+        for ip, key in want.items():
+            if ip in self.srv:
+                continue
+            try:
+                s = TailnetServer((ip, self.port), self.handler, dev=key[0], front=self)
+            except OSError as e:
+                self.bind_err = bind_words(ip, self.port, key[0], e)
+                continue
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+            self.srv[ip] = (s, key)
+            self.binds += 1
+
+    def report(self, why):
+        listening = sorted(self.srv)
+        dev = next((key[0] for _, key in self.srv.values() if key[0]), None)
+        err = why or (self.cert_err if self.ctx is None else None) or self.bind_err
+        note = self.cert_err if self.ctx is not None else None   # the door is open on the certificate in hand; a fresh one was refused
+        expired = bool(self.ctx is not None and self.until and self.until < time.time())
+        if expired:   # it listens, but no phone will accept what it shows
+            err = err or f"the certificate ran out on {day(self.until)} and Tailscale has not given a new one" + (f" ({note})" if note else "")
+        if listening and self.proxied and not err:
+            err = (f"`tailscale serve` is still set up for port {self.port} on this node, so tailnet traffic goes through it and "
+                   f"never reaches this listener. Take it down: tailscale serve --https={self.port} off")
+        state = (tuple(listening), err, note, self.until, OWNER.get("dns"), dev, self.binds)
+        if state == self.told:
+            return
+        self.told = state
+        TAILNET.update(listening=listening, dev=dev, error=err or note, tls_until=self.until, dead=not listening or expired)
+        with contextlib.suppress(OSError):
+            write_server_json(self.port)
+        if listening:
+            print(f"shepr: serving the tailnet itself at {public_url(self.port)} ({' and '.join(listening)}"
+                  f"{' on ' + dev if dev else ', bound by address only'}; certificate good until {day(self.until)}; "
+                  "callers checked with tailscale whois)", file=sys.stderr, flush=True)
+        if err:
+            print(f"shepr: the tailnet listener is {'only partly' if listening else 'not'} up: {err}", file=sys.stderr, flush=True)
+        elif note:
+            print(f"shepr: tailnet certificate not refreshed, still serving the one in hand: {note}", file=sys.stderr, flush=True)
+
+    def tick(self):
+        now = time.monotonic()
+        addrs = iface_addrs()
+
+        def present():   # this node's tailnet addresses that are on the machine right now
+            return [ip for ip in OWNER.get("ips") or [] if TAILNET_DEV or not addrs or ip in addrs]
+        up = present()
+        if (not tailnet_known() or not up) and now >= self.learn_next:
+            # Not known yet, or the addresses that were known are gone from the machine: ask Tailscale. Every few seconds
+            # for the first minute, every half minute after that (a machine with Tailscale switched off is not hammered).
+            self.learn_tries += 1
+            self.learn_next = now + (TAILNET_RETRY_S if self.learn_tries <= 12 else 30.0)
+            learn_tailnet(quiet=True)
+            up = present()
+            tp = None if (tailnet_known() and up) else tailscale_problem()
+            self.ts_said = f"{tp[0]}. Fix: {tp[1]}" if tp else None
+        why = None
+        if not tailnet_known():
+            why = self.ts_said or "Tailscale has not said who this node is yet"
+        elif not owner_login():
+            why = "this node is a tagged device, which has no user: set SHEPR_OWNER to your Tailscale login"
+        elif not up:
+            why = self.ts_said or "this node's tailnet address is not on any interface here (Tailscale is off, or runs without one)"
+        else:
+            self.learn_tries = 0
+        ready = why is None
+        if ready and self.ctx is None:
+            kept = saved_cert(OWNER["dns"])   # the one an earlier run kept opens the door at once
+            if kept:
+                self.ctx, self.until = kept
+            elif now >= self.cert_next:
+                self.ask_cert(now)            # nothing to serve with yet: asking is all there is to do
+        made = self.binds
+        self.listen(addrs, up if ready else [])
+        if self.srv and (self.binds != made or now >= self.serve_next):   # at every new listener, and four times an hour
+            self.serve_next = now + 900.0
+            self.proxied = serve_in_front(self.port)
+        self.report(why)
+        if ready and self.ctx is not None and now >= self.cert_next:
+            self.ask_cert(now)                # the door is open meanwhile; a change is reported by the next pass
+
+    def run(self):
+        while True:
+            try:
+                self.tick()
+            except Exception:   # a mistake here must not end the thread that keeps the door open
+                traceback.print_exc(file=sys.stderr)
+            time.sleep(FRONT_TICK_S)
+
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("pair", "devices", "revoke", "status", "fix-boot", "live"):
@@ -4180,7 +4837,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("port", nargs="?", type=int, default=8742)
     ap.add_argument("--bind", default="127.0.0.1")
+    ap.add_argument("--tailnet", action="store_true", default=os.environ.get("SHEPR_TAILNET") == "1",
+                    help="serve this node's tailnet addresses itself: own TLS (tailscale cert), every caller checked with "
+                         "tailscale whois, no `tailscale serve` in front")
     a = ap.parse_args()
+    if a.tailnet and a.bind not in ("127.0.0.1", "localhost"):
+        sys.exit("shepr: --tailnet serves the tailnet addresses itself, with TLS. Leave --bind at 127.0.0.1.")
+    TAILNET["on"] = bool(a.tailnet)
     try:
         os.nice(5)  # Law 22: background work never competes with Fred's typing
     except OSError:
@@ -4200,7 +4863,9 @@ def main():
         pass
     _tailnet["port"] = a.port
     write_server_json(a.port)
-    if not tailnet_known() and shutil.which("tailscale"):
+    if TAILNET["on"]:
+        threading.Thread(target=Front(a.port, handler).run, daemon=True).start()   # learns the identity too, and keeps the listeners up
+    elif not tailnet_known() and shutil.which("tailscale"):
         threading.Thread(target=tailnet_retry_loop, daemon=True).start()
     devices()
     load_push()

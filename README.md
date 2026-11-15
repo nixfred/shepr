@@ -15,15 +15,20 @@ It works with [herdr](https://herdr.dev) today. Orca support is coming.
 <p align="center"><img src="docs/img/flow.svg" alt="iPhone to Tailscale to the host running server.py to herdr and the other machines" width="100%"></p>
 
 The phone talks to **one** host. That host reaches the rest with `herdr --machine <label>` over the SSH keys you already
-have. Nothing listens beyond `127.0.0.1`; `tailscale serve` is the only way in, and it only answers your tailnet.
+have. The host serves the app itself (`server.py 8742 --tailnet`): it listens on `127.0.0.1` and on the machine's own
+tailnet address, tied to the Tailscale interface, so nothing answers on your LAN or on the internet. Before it reads a
+byte from a connection it asks Tailscale whose device is on the other end (`tailscale whois`), and it goes on only for
+yours. Nothing sits in front of it: no `tailscale serve`, no proxy.
 
 It is HTTPS because it has to be: iOS refuses WebCrypto (the phone's key), the camera (the QR scan) and service
-workers on plain `http://`. `tailscale serve` supplies a real certificate on your tailnet name.
+workers on plain `http://`. The certificate is the real one Tailscale issues for your tailnet name (`tailscale cert`).
+The server fetches it and keeps it fresh itself.
 
 ## Use it
 
 ```bash
 # once, on the machine that runs herdr (needs python3, tailscale, herdr on PATH, and qrencode for the QR):
+sudo tailscale set --operator=$USER      # lets your user ask Tailscale for this machine's certificate
 git clone https://github.com/nixfred/shepr && cd shepr
 # ~/.local/bin or ~/bin, whichever this PATH already searches first. Otherwise ~/.local/bin.
 bindir=$(printf '%s\n' "$PATH" | tr ':' '\n' | while IFS= read -r d; do
@@ -40,13 +45,9 @@ StartLimitIntervalSec=0
 
 [Service]
 WorkingDirectory=$PWD
-ExecStartPre=-/usr/bin/tailscale wait --timeout=120s
-ExecStart=/usr/bin/python3 $PWD/server.py 8742
-ExecStartPost=/usr/bin/tailscale serve --bg --https=8742 http://127.0.0.1:8742
-ExecStopPost=-/usr/bin/tailscale serve --https=8742 off
+ExecStart=/usr/bin/python3 $PWD/server.py 8742 --tailnet
 Restart=on-failure
 RestartSec=5
-TimeoutStartSec=180
 
 [Install]
 WantedBy=default.target
@@ -55,14 +56,36 @@ systemctl --user daemon-reload && systemctl --user enable --now shepr
 shepr pair                                                           # shows a QR code
 ```
 
-**Installed before 2026-10-14?** Run `shepr fix-boot` once. The old unit could start before Tailscale was connected at boot, fail on `tailscale serve`, and stay down after systemd's five quick retries, so the phone found nothing until someone started it by hand. `fix-boot` adds a drop-in that waits for Tailscale and keeps retrying; `shepr status` warns while a unit still lacks it.
+**HTTPS certificates have to be on for your tailnet** (the DNS page of the Tailscale admin console, once). `shepr status` says so when the certificate cannot be had, and what to do.
+
+**Already running behind `tailscale serve`?** That was the install until 2026-11-15, and it still works. To move a machine over, keeping its address and every paired phone:
+
+```bash
+shepr status                                # names your unit; "shepr" below
+systemctl --user stop shepr
+tailscale serve --https=8742 off            # the old way in (sudo if your user is not Tailscale's operator)
+mkdir -p ~/.config/systemd/user/shepr.service.d
+cat > ~/.config/systemd/user/shepr.service.d/tailnet.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/bin/python3 $(readlink -f "$(command -v shepr)") 8742 --tailnet
+ExecStartPre=
+ExecStartPost=
+ExecStopPost=
+EOF
+systemctl --user daemon-reload && systemctl --user start shepr && shepr status
+```
+
+`shepr status` then says `serves the tailnet itself on <address>`. If the old entry is still there it says that instead, with the command above: tailscaled takes a port it serves before any listener of yours sees the traffic. To go back, delete that one file, reload and restart: the old unit is untouched underneath.
+
+**Staying behind `tailscale serve`, or a proxy of your own.** Start `server.py 8742` without `--tailnet` and it listens on `127.0.0.1` only and takes the caller from the `Tailscale-User-Login` header that `tailscale serve` adds (`ExecStartPost=/usr/bin/tailscale serve --bg --https=8742 http://127.0.0.1:8742` in the unit). You need this where Tailscale runs without a network interface of its own (userspace networking, some containers): there is no tailnet address on the machine to listen on. Such a unit can start before Tailscale is connected at boot, fail on `tailscale serve` and stay down, so run `shepr fix-boot` once: it adds a drop-in that waits for Tailscale and keeps retrying, and `shepr status` warns while a unit lacks it. A unit started with `--tailnet` needs neither.
 
 **A unit that keeps failing says why.** When the server is down and systemd is still trying to start it, `shepr status` and `shepr pair`
 print the unit's last real error line from its journal and how often it restarted, and the fix when they recognise the cause
 (`tailscale serve` refused for a user who is not its operator: `sudo tailscale set --operator=$USER`). Before v49 they said only
 "not running, start it".
 
-**Tailscale has to be connected.** Shepr only answers over your tailnet, so the unit waits up to two minutes for Tailscale at start and fails when it is off or logged out (`enable --now` then reports `control process exited with error code`, and the unit keeps retrying). When the server is down, `shepr pair` and `shepr status` check Tailscale and say so, for example *Tailscale is turned off on this machine* with the fix (`tailscale up`), instead of only telling you to start a unit that cannot start. Connect Tailscale, then `systemctl --user start shepr`.
+**Tailscale has to be connected.** Shepr only answers over your tailnet. Started with `--tailnet` before Tailscale is up (a boot, a slow login), the server runs, waits, and opens its tailnet door when Tailscale is there; nothing has to be restarted. Until then `shepr status` and `shepr pair` say what it is waiting for, for example *Tailscale is turned off on this machine* with the fix (`tailscale up`). It follows Tailscale afterwards too: when the interface is made anew (tailscaled restarted) it binds again, and it asks for the certificate again twice a day.
 
 The link goes in `~/.local/bin` or `~/bin`, whichever comes first on `PATH`. If neither does, this paste uses `~/.local/bin` and adds it for this shell. The unit written here is named `shepr`. A nixweb install keeps the unit name it already chose.
 
@@ -392,10 +415,13 @@ Every setting is an environment variable on the server. Nothing needs setting fo
 | `SHEPR_NEW_CMD` | `claude` | The command typed to start a session in Start new and Existing folder. Point it at a shell alias of your own to add flags, for example one that runs `claude` with your preferred options. |
 | `SHEPR_CLAUDE_CMD` / `SHEPR_CODEX_CMD` | `claude` / `codex` | The commands typed to wake a sleeping Claude or Codex project. |
 | `SHEPR_PROJECTS` | `~/Projects` | The base folder Start new creates in and Existing folder lists. |
-| `SHEPR_STATE` | `~/.local/state/shepr` | Where paired devices, the audit log and push keys live. Files are mode 0600 in a 0700 folder. |
+| `SHEPR_STATE` | `~/.local/state/shepr` | Where paired devices, the audit log, push keys and (with `--tailnet`) the TLS certificate and its key live. Files are mode 0600 in a 0700 folder. |
 | `SHEPR_LABEL` | the hostname | The name this machine shows in the app. |
 | `SHEPR_OWNER` | this machine's Tailscale login | The one login allowed in over the tailnet. |
-| `SHEPR_ALLOW_HOSTS` | none | Extra DNS names (comma separated) accepted in the Host header, for a name you put in front of `tailscale serve`. |
+| `SHEPR_ALLOW_HOSTS` | none | Extra DNS names (comma separated) accepted in the Host header, for a name of your own in front of the server. |
+| `SHEPR_TAILNET` | off | `1` is the same as starting with `--tailnet`. |
+| `SHEPR_KEEPALIVE` | on | With `--tailnet`, a phone keeps its TLS connection between requests. `0` answers one request per connection. |
+| `SHEPR_TAILNET_DEV` | found | With `--tailnet`, the interface the listener is tied to. Normally the one that holds the tailnet address is found by itself. |
 | `SHEPR_URL` | the tailnet name of this machine | The address `shepr pair` prints and puts in the QR. |
 | `SHEPR_POLL` | `15` | Seconds between refreshes of herdr's state. |
 | `SHEPR_SESSIONS` | all | Which running named herdr sessions on this machine to include: unset or `all` is every one, a comma list (`work,review`) only those, `default` none (just the plain session). The session your `HERDR_SOCKET_PATH` already points at is never listed twice. |
@@ -405,7 +431,7 @@ Every setting is an environment variable on the server. Nothing needs setting fo
 | `SHEPR_WATCH_S` | `60` | Seconds between passes over Claude Code's session files (5 at least). A pass with nothing new costs one `stat` per recent file. |
 | `SHEPR_QUIET_MIN` | `15` | Minutes without output after which a working agent is called quiet. |
 | `SHEPR_BURN_WEIGHTS` | built in | Model factors for the burn shares, for example `opus=3,sonnet=1,haiku=0.2`. |
-| `SHEPR_ALLOW_PROXY` | off | `1` accepts requests that came through a reverse proxy of your own. Without it a forwarded request with no tailnet user on it is refused. |
+| `SHEPR_ALLOW_PROXY` | off | `1` accepts requests that came through a reverse proxy of your own. Without it a forwarded request is refused: one with no tailnet user on it behind `tailscale serve`, any at all with `--tailnet`. |
 | `SHEPR_READONLY` | off | `1` turns every write off. |
 | `SHEPR_USAGE` | on | `0` turns the subscription meter off. |
 | `SHEPR_VAPID_SUB` | this repository's address | The contact the push service sees. |
@@ -428,11 +454,31 @@ The tests also use `SHEPR_LOCAL_ONLY`, `SHEPR_PUSH_ALLOW`, `SHEPR_USAGE_FIXTURE`
   (herdr refuses a fake agent that is not the pane's foreground process).
 - iOS may delete a Home Screen app's storage if it is removed; the key goes with it. Pair again.
 - One Shepr per phone install: the app is served from one origin.
-- The server listens on loopback and trusts `tailscale serve` to be the only way in. Another process on the same
-  machine can reach that port directly and is not asked for the Tailscale identity header (which it could forge
-  anyway). It still cannot read or send anything: every `/api` call except `hello` and `pair` needs a signature from
-  a paired phone, and pairing needs a one-time code from `shepr pair`. A request `tailscale serve` forwards with no
-  user on it (a tagged device) is refused; before v49 it was taken for a local process.
+- With `--tailnet`, who may connect is what `tailscale whois` says when the connection opens: the node's owner, on a
+  device that carries no tag. A tagged device, another user of your tailnet and a node shared in from somebody else's
+  are closed before any TLS, with nothing sent. The answer is believed for two minutes and looked up again at every
+  request, also on a connection that is kept, so a device that stops being yours stops being answered within those two
+  minutes. The listener is tied to the
+  Tailscale interface (Linux, `SO_BINDTODEVICE`); on a system without that it is bound by address alone. It needs
+  Tailscale's own interface: with userspace networking there is no address to listen on (stay behind `tailscale serve`
+  there). The HTTP server underneath is Python's standard one, which was not written to face a hostile network. Here
+  only your own devices get as far as it, and a connection is kept for a second request only when the first was read to
+  its last byte, so nothing a web page makes a phone send can be taken for a request of its own (`tests/tailnet_test.py`).
+  A refusal that goes out before an upload was read is followed by taking in the rest of the upload (30 s, 16 MB at most), so
+  the phone can read why; past those limits it sees a dropped connection instead.
+- Another process on the same machine can reach the loopback port directly and is taken for local. It still cannot read
+  or send anything: every `/api` call except `hello` and `pair` needs a signature from a paired phone, and pairing needs
+  a one-time code from `shepr pair`. Behind `tailscale serve`, the server trusts the header it adds; a request it forwards
+  with no user on it (a tagged device) is refused, where before v49 it was taken for a local process.
+- `--tailnet` was tested on one Linux host (2026-11-15): `tests/tailnet_test.py` on real sockets with a stand-in `tailscale`
+  (who is let in, the request-smuggling cases, deadlines, certificate renewal, rebinding, eight clients at once), and ten
+  deliberate breakages of the server, each of which that file caught; the whole browser suite over a real TLS listener on
+  the host's tailnet address; from a second machine on the tailnet with curl and headless Chromium, over IPv4 and IPv6;
+  from a real tagged device (closed before TLS); `tests/hostile_lan.sh`, from a network namespace that is not on the
+  tailnet (refused on IPv4 and IPv6); and an interface deleted and made again under a running server (a dummy one standing
+  in for Tailscale's: the old socket was dead, and the listener was back on the next pass). Not tested: tailscaled itself
+  restarting under a running server, macOS, and Tailscale without an interface of its own. On an iPhone this way in has
+  had far less use than the old one.
 - The watch reads Claude Code's session files only, and only on the machine Shepr runs on: Codex sessions and sessions
   on other machines have no burn, no risky-command log and no quiet mark. The list of risky commands is short on
   purpose and is a notice, not a guard: it tells you after the fact, it stops nothing, and a command can be written to
@@ -461,10 +507,10 @@ index.html app.css app.js sw.js manifest.webmanifest
 icons/               logo.svg, app icons, launch images (iOS shows these before any code runs)
 vendor/jsQR.js       the one third-party file: Safari has no BarcodeDetector. Apache-2.0, see vendor/README.md
 docs/img/            the graphics above (hand-built SVG) and real screenshots
-tests/               the UI suite (ui.mjs), the Python and node suites listed under Testing, fake-session.sh, shots.mjs
+tests/               the UI suite (ui.mjs), the Python and node suites listed under Testing, fake-session.sh, shots.mjs, hostile_lan.sh
 ```
 
-State: `~/.local/state/shepr/` (`devices.json`, `seen.json`, `pairing.json`, `usage-samples.jsonl`, `sends.jsonl` audit log, `events.jsonl` activity log, and for the Lock Screen card `live.json`, `apns.json`, `AuthKey.p8`), mode 0600.
+State: `~/.local/state/shepr/` (`devices.json`, `seen.json`, `pairing.json`, `usage-samples.jsonl`, `sends.jsonl` audit log, `events.jsonl` activity log, `tls/` with the certificate and its key when the host serves the tailnet itself, and for the Lock Screen card `live.json`, `apns.json`, `AuthKey.p8`), mode 0600.
 Logs: `journalctl --user -u shepr -f`. The app shell is fetched network-first (2.5 s, then
 cache) so a change shows on the next open and the app still opens offline.
 The host also announces the current build (`/api/hello`, `/api/queue`). A Home Screen app can stay alive in iOS
@@ -485,7 +531,10 @@ export SHEPR_WATCH_FIXTURE=/tmp/claude-1000/shepr-watch.json SHEPR_WATCH_S=5   #
 export SHEPR_CLAUDE_CMD='echo STARTED' SHEPR_CODEX_CMD='echo CODEX' SHEPR_NEW_CMD='echo CCC' SHEPR_PROJECTS=/tmp/shepr-projects SHEPR_PUSH_ALLOW=127.0.0.1:9988 SHEPR_AWAIT_CLEAR_S=3
 python3 server.py 8743 &
 node tests/ui.mjs; node tests/small_screen.mjs; node tests/sw_offline.mjs; node tests/push_sw.mjs; node tests/format.mjs; node tests/draft_commit.mjs; python3 tests/pair_cli_test.py
-for t in menu_parse server_hardening history push usage ledger status qr_secret live autoadd network_gate plan_host open_folder sessions tailscale_off watch watch_server fixes_v49; do python3 tests/${t}_test.py; done   # pure Python, no server needed
+for t in menu_parse server_hardening history push usage ledger status qr_secret live autoadd network_gate plan_host open_folder sessions tailscale_off watch watch_server fixes_v49 tailnet; do python3 tests/${t}_test.py; done   # pure Python, no server needed
+# the host-served mode over a real tailnet listener: start the test server with --tailnet and SHEPR_URL=https://<node>.<tailnet>.ts.net:8743, then
+#   SHEPR_TEST_BASE=https://<node>.<tailnet>.ts.net:8743 node tests/ui.mjs     (this machine reaches its own tailnet address)
+#   tests/hostile_lan.sh 8743                                                (asks sudo: from a network namespace that is not on the tailnet, the port must be closed)
 node tests/shots.mjs                           # regenerates docs/img/screens.png from the RUNNING app
 (cd ios && swift test && swift run shepr-live-render /tmp/shepr-render)   # macOS with Xcode: the Lock Screen card, and a 160 pt height check
 tests/fake-session.sh down

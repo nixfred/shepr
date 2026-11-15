@@ -39,7 +39,7 @@ Do you want to proceed?
 const b = await chromium.launch({ executablePath: '/usr/bin/chromium', args: ['--no-sandbox'] });
 const ctx = await b.newContext({ ...devices['iPhone 14'], serviceWorkers: 'block' });
 const p = await ctx.newPage();
-await p.goto('http://localhost:8743/');
+await p.goto((process.env.SHEPR_TEST_BASE || 'http://localhost:8743') + '/');
 await p.waitForFunction(() => window.shepr && window.shepr.renderBlocks);
 await p.evaluate((txt) => {
   document.getElementById('splash')?.remove(); document.getElementById('pair').hidden = true;

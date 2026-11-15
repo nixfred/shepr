@@ -10,7 +10,7 @@ const pw = [process.env.PW_PATH, (process.env.HOME || '') + '/.local/share/mise/
 if (!pw) { console.error('playwright not found: npm i -g playwright, or set PW_PATH to its node_modules directory'); process.exit(1); }
 const { chromium } = pw;
 
-const BASE = 'http://localhost:8743';
+const BASE = process.env.SHEPR_TEST_BASE || 'http://localhost:8743';
 const SERVER = new URL('../server.py', import.meta.url).pathname;
 const ENV = { ...process.env, SHEPR_STATE: process.env.SHEPR_STATE || '/tmp/claude-1000/shepr-state', SHEPR_URL: BASE };
 const newCode = () => JSON.parse(execFileSync('python3', [SERVER, 'pair', '--no-wait', '--json'], { env: ENV, encoding: 'utf8' })).code;

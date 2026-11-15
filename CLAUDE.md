@@ -31,11 +31,25 @@ read its CLAUDE.md first). The directory name is Fred's session name; the produc
     never a command. The burn is a SHARE with exact token counts beside it, never money. Changes runs git read-only
     (`GIT_OPTIONAL_LOCKS=0`, no fsmonitor, no external diff) and shows only files git itself lists as changed.
 
+13. **The host serves (Fred, 2026-11-14: "NEVER use tailscale SERVE. Always use the host to serve").** Shepr runs as
+    `server.py PORT --tailnet`: its own TLS listener on the node's tailnet addresses, tied to the Tailscale interface, the
+    certificate from `tailscale cert`, the caller from `tailscale whois`. Never put `tailscale serve` or `funnel` in front of
+    it again: not in a unit, not in a doc, not in a test. Three things in that code carry the weight, and
+    `tests/tailnet_test.py` holds each: (a) whois is asked BEFORE anything is read from a connection and again for every
+    request on a kept one, only the owner's login on a device with no tag goes on, and a header never says who the caller is
+    there; (b) a connection carries a second
+    request only after the first was read to its last byte (`reusable`, `declared_body`), and the answer says
+    `Connection: close` otherwise; (c) a tailnet address never answers plain HTTP. The loopback-only mode (no `--tailnet`)
+    stays in the code for other people's installs and as the way back: do not remove it. After touching any of this run
+    `tests/tailnet_test.py`, the browser suites over a real listener (`SHEPR_TEST_BASE`), and `tests/hostile_lan.sh`.
+
 ## Where things live
 
 `server.py` is the backend and the `shepr` CLI; `usage.py` is the subscription meter (first-party, standard library only). State is in `~/.local/state/shepr/`. herdr has no
-timestamps, so `seen.json` is how "blocked for" works. Auth: device ECDSA key (pure-Python verify) plus the
-Tailscale owner header. See README.md.
+timestamps, so `seen.json` is how "blocked for" works. Auth: device ECDSA key (pure-Python verify) plus who Tailscale
+says is connecting (`tailscale whois` when the connection opens, rule 13; behind `tailscale serve`, the owner header it
+adds). The certificate and its key are in `~/.local/state/shepr/tls/` (0600 in 0700): never print, log or copy the key.
+See README.md.
 
 `watch.py` is the watch (rule 12): token use per session, risky commands and last activity, from Claude Code's session files; the server keeps
 the activity log in `events.jsonl`. `SHEPR_WATCH=0` turns it off.

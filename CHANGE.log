@@ -1,6 +1,22 @@
 Shepr change log. Newest first.
 Every outside contribution is listed with the contributor's GitHub profile and, when one could be verified, their X profile.
 
+2026-11-15  server only  the host serves
+  `server.py PORT --tailnet`: Shepr serves its tailnet address itself, with nothing in front. It listens on the node's own tailnet
+      addresses, tied to the Tailscale interface (a packet that arrives over the LAN finds nothing), speaks TLS with the certificate
+      `tailscale cert` hands out (fetched and kept fresh by the server), and asks `tailscale whois` whose device is connecting before
+      it reads a byte: the owner on a device with no tag, or the connection is closed with nothing sent. A phone keeps its TLS
+      connection between requests, and only after a request that was read to its last byte. The server waits for Tailscale by itself
+      (a boot where Tailscale is slow no longer fails the unit) and binds again when the interface is made anew.
+      `tailscale serve` is no longer part of the install. A machine already behind it keeps working and moves over with one drop-in,
+      keeping its address and its paired phones (README, "Already running behind `tailscale serve`?").
+      An answer is now one write with Nagle off: a request over a kept connection took 110 ms from a second machine and takes 35.
+      A refusal that goes out before an upload was read is followed by taking in the rest of it, so the phone reads the refusal
+      and not a reset (HTTP/2 through `tailscale serve` used to hide that). A kept connection is asked about again at every
+      request. `shepr status` says when a `tailscale serve` entry for the port was left behind, and when the certificate has run out.
+      `tests/tailnet_test.py` (195 checks, real sockets, a stand-in `tailscale`) and `tests/hostile_lan.sh` (a namespace that is not
+      on the tailnet must be refused) are new; the browser suites take `SHEPR_TEST_BASE` to run over a real listener.
+
 2026-11-14  server only  Bendangelo  https://github.com/bendangelo
   X: https://x.com/bendangelo (linked from their own site bendangelo.me and the name matches, checked 2026-11-14)
   #5  With Tailscale turned off the unit cannot start (`tailscale serve` fails), and `shepr pair` answered "the server is not running,

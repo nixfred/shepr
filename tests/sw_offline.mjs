@@ -10,7 +10,7 @@ const ctx = await b.newContext({ ...devices['iPhone 14'] });
 const p = await ctx.newPage();
 const res = [];
 const check = (n, c) => { res.push(!!c); console.log((c ? 'PASS ' : 'FAIL ') + n); };
-await p.goto('http://localhost:8743/');
+await p.goto((process.env.SHEPR_TEST_BASE || 'http://localhost:8743') + '/');
 await p.evaluate(() => navigator.serviceWorker.ready.then(() => true));
 await p.reload(); await p.waitForTimeout(800);                       // now controlled by the worker
 check('service worker controls the page', await p.evaluate(() => !!navigator.serviceWorker.controller));
