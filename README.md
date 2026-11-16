@@ -124,7 +124,7 @@ To remove it, run `omarchy plugin remove nixfred.shepr`. That deletes the plugin
 | **Queue** | Everything, in the order that matters: **Needs you** (longest blocked first), **Finished**, **Working**, then **Sleeping** last (with a **Wake…** button). Sessions are named after your herdr workspace ("Shepr"), falling back to the project directory. Badge shows what needs you. | It refreshes itself every 10 s while the app is open and the moment you come back to it; pull down from the top of any list to refresh on demand.
 | **Radar** | Every session on every host as a radar, with the counts (waiting, finished, working, idle) and the longest wait above it (below). |
 | **Subs** | Your Claude, Codex, Kimi and Grok subscriptions on one animated page: how much of each plan is used, and whether you are banked, on pace or behind (below). |
-| **Hosts** | Hosts herdr can reach (turn saved ones on or off) and a tailnet scan for more. |
+| **Hosts** | Hosts herdr can reach (turn saved ones on or off), tmux sessions on machines that have no herdr (read only), and a scan for more: your tailnet, and a LAN range if you name one. |
 | **Settings** | Four sections that each fit one screen. **Display**: text size, splash screen (Full, Short or Off), animations, which tab to open on, how often to refresh, slash commands, top spacing. **Alerts**: notifications. **Phones**: this phone's key, the phones the host trusts (revoke), pair another, forget this one. **About**: the build, gestures, reload, clear unsent drafts. Two links sit at the very bottom: nixfred.com and this repository. |
 
 The Queue and Radar show **every host at once**; each session carries a coloured pill naming its machine (`GUS`, `VIC`), and the chips on top (`All hosts`, `gus 3`, `vic 1`) are only a filter if you tap one. `SHEPR_LOCAL_ONLY=1` makes the server ignore remote machines and other sessions (the tests use it).
@@ -406,6 +406,41 @@ Add button, because adding starts a server there. It adds at most five a scan, w
 (`sends.jsonl`, kind `host_add_auto`), and does not retry a failed add for an hour. To stay quiet, a background scan does not log
 in again for an hour to a node that answered `no herdr`, `needs key` or `first connect`; the **Scan tailnet** button always asks
 everyone. It never removes a machine, and a read-only server never adds one.
+
+**Scanning a LAN as well.** A tailnet says whose a node is; a LAN does not. So the scan reaches into a LAN only when you name the range:
+`SHEPR_SCAN_NETS=192.168.1.0/24` (up to four, comma-separated; each must be a private IPv4 range of at most 1024 addresses, `/22` or
+smaller, and anything else is refused and said on stderr). Every address that answers on port 22 is then asked with the same strict
+probe as a tailnet node: this host's key, no prompt, and a host key this host **already knows**. A machine it has never connected to is
+listed as `first connect` and is never offered a key, and it is never trusted on its own. A machine is named by its DNS name when that
+name leads back to the same address, otherwise `lan-192-168-1-20`; one saved already (herdr machine, tmux host, or a tailnet peer by the
+same name) is not offered again, nor is this machine. A LAN device that takes the connection and never logs in is asked again after half
+an hour, not every scan. With `SHEPR_AUTOADD=1` the same gates apply, and a machine known only by its address is never added without a
+tap. Off, as before, when `SHEPR_SCAN_NETS` is not set.
+
+### tmux sessions on a machine that has no herdr (read only)
+
+```bash
+shepr tmux add buildbox --session work     # ssh buildbox, show only the tmux session "work"
+shepr tmux add buildbox --session work --label build      # its name on the phone
+shepr tmux list
+shepr tmux remove build                    # nothing is changed on that machine
+```
+
+`add` reads the machine once to prove it works (the host must already trust this host's key and be a host key it knows: Shepr never
+accepts a new one, run `ssh buildbox` once yourself). It then appears in the Hosts tab and the lists: one row for each pane of the session(s)
+you named (no `--session`: every session on that machine), named for its session, and **working** when its window printed anything in the
+last 15 seconds (`SHEPR_TMUX_WORKING_S`, measured on that machine's own clock) and **idle** otherwise. Open one and you read its text, up to the
+last 1,000 lines. That is all it does:
+
+- **Read only, by construction.** No message box, no keys, no Send is drawn for it, and the server refuses a send at prepare. As a last wall
+  `run_herdr` itself refuses a tmux host, so no path can reach it. The only commands Shepr runs there are `tmux list-panes` and
+  `tmux capture-pane`.
+- It is never **blocked** or **done**, so it never enters the Queue, never notifies, and is not counted by the Lock Screen card or the "everything
+  has stopped" notice. A tmux pane has no agent state to read: "working" is a guess from output activity, and a quiet build is "idle".
+- Only the sessions you named can be read: the pane id is checked against them before the text is fetched.
+- ssh keeps one shared connection to the machine for two minutes (`ControlPersist`, a private folder in the state directory), so a poll is
+  not a fresh login in that machine's auth log every 15 seconds.
+- The text is shown as it is on that screen. The risky-command check of the watch does not look at it.
 ## Configuration
 
 Every setting is an environment variable on the server. Nothing needs setting for a normal install.
@@ -427,6 +462,9 @@ Every setting is an environment variable on the server. Nothing needs setting fo
 | `SHEPR_SESSIONS` | all | Which running named herdr sessions on this machine to include: unset or `all` is every one, a comma list (`work,review`) only those, `default` none (just the plain session). The session your `HERDR_SOCKET_PATH` already points at is never listed twice. |
 | `SHEPR_AUTOADD` | off | `1` scans your tailnet in the background and saves the nodes that are running herdr (see More hosts). Ignored when `SHEPR_READONLY=1`. |
 | `SHEPR_SCAN_S` | `300` | Seconds between those background scans (60 at least). |
+| `SHEPR_SCAN_NETS` | off | Private IPv4 ranges (`192.168.1.0/24`, comma-separated, at most four, each at most 1024 addresses) to scan for ssh machines as well as your tailnet (see More hosts). |
+| `SHEPR_TMUX_WORKING_S` | `15` | A tmux pane whose window printed within this many seconds is shown as working. |
+| `SHEPR_SSH` | `ssh` | The program used to reach tmux hosts. The tests put a stand-in here. |
 | `SHEPR_WATCH` | on | `0` switches the watch off: no session files are read, so no burn, no risky commands and no quiet. |
 | `SHEPR_WATCH_S` | `60` | Seconds between passes over Claude Code's session files (5 at least). A pass with nothing new costs one `stat` per recent file. |
 | `SHEPR_QUIET_MIN` | `15` | Minutes without output after which a working agent is called quiet. |
@@ -484,7 +522,9 @@ The tests also use `SHEPR_LOCAL_ONLY`, `SHEPR_PUSH_ALLOW`, `SHEPR_USAGE_FIXTURE`
   purpose and is a notice, not a guard: it tells you after the fact, it stops nothing, and a command can be written to
   slip past it. It was tuned on one day of real sessions (107 hits at first, 14 that mattered after tuning).
 - Shepr polls every machine that is enabled in your herdr config. Machines you add from the Hosts tab, or that
-  `SHEPR_AUTOADD` adds, are limited to your own tailnet nodes, but one you added to herdr by hand is yours to vouch for.
+  `SHEPR_AUTOADD` adds, are limited to your own tailnet nodes and, if you set `SHEPR_SCAN_NETS`, machines on those LAN ranges whose
+  host key this host already knows and whose login already accepts its key, but one you added to herdr by hand is yours to vouch for.
+  A LAN has no owner to ask, so for those machines "yours" means only that: a key you already trust there.
 - The Lock Screen card is a separate native app (`ios/`). Apple ends a card after 8 hours (it leaves the Lock Screen at most 4 hours
   later), allows 160 points of height and 4 KB per update, and budgets pushes per hour, so the host spends the immediate kind only
   when an agent starts or stops waiting on you. A free Apple ID cannot receive pushes: there the card refreshes only while Shepr
@@ -531,7 +571,8 @@ export SHEPR_WATCH_FIXTURE=/tmp/claude-1000/shepr-watch.json SHEPR_WATCH_S=5   #
 export SHEPR_CLAUDE_CMD='echo STARTED' SHEPR_CODEX_CMD='echo CODEX' SHEPR_NEW_CMD='echo CCC' SHEPR_PROJECTS=/tmp/shepr-projects SHEPR_PUSH_ALLOW=127.0.0.1:9988 SHEPR_AWAIT_CLEAR_S=3
 python3 server.py 8743 &
 node tests/ui.mjs; node tests/small_screen.mjs; node tests/sw_offline.mjs; node tests/push_sw.mjs; node tests/format.mjs; node tests/draft_commit.mjs; python3 tests/pair_cli_test.py
-for t in menu_parse server_hardening history push usage ledger status qr_secret live autoadd network_gate plan_host open_folder sessions tailscale_off watch watch_server fixes_v49 tailnet; do python3 tests/${t}_test.py; done   # pure Python, no server needed
+node tests/tmux_ui.mjs                         # starts its own server (port 8746) with a stand-in ssh; no real machine is asked
+for t in menu_parse server_hardening history push usage ledger status qr_secret live autoadd network_gate plan_host open_folder sessions tailscale_off watch watch_server fixes_v49 tailnet tmux lan_scan; do python3 tests/${t}_test.py; done   # pure Python, no server needed
 # the host-served mode over a real tailnet listener: start the test server with --tailnet and SHEPR_URL=https://<node>.<tailnet>.ts.net:8743, then
 #   SHEPR_TEST_BASE=https://<node>.<tailnet>.ts.net:8743 node tests/ui.mjs     (this machine reaches its own tailnet address)
 #   tests/hostile_lan.sh 8743                                                (asks sudo: from a network namespace that is not on the tailnet, the port must be closed)

@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v49';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v50';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -1306,7 +1306,7 @@ function hostRow(h) {
   const r = el('div', 'hrow');
   const m = el('div', 'meta');
   const counts = Object.keys(h.counts || {}).map((k) => h.counts[k] + ' ' + k).join(', ');
-  m.append(el('div', 'ttl', h.id + (h.kind === 'local' ? ' · this machine' : h.kind === 'session' ? ' · a herdr session here' : '')),
+  m.append(el('div', 'ttl', h.id + (h.kind === 'local' ? ' · this machine' : h.kind === 'session' ? ' · a herdr session here' : h.kind === 'tmux' ? ' · tmux over ssh, read only' : '')),
            el('div', 'sub' + (h.status !== 'ok' && h.enabled ? ' bad' : ''), h.status === 'ok' ? (counts || 'no sessions') : !h.enabled ? 'saved, switched off'
              : ((h.error || 'not answering').slice(0, 90) + (h.last_ok ? '  \u00b7  last seen ' + agoText(h.last_ok) : '  \u00b7  not seen since Shepr started'))));
   r.append(m);
@@ -1348,7 +1348,7 @@ function paintHostsView(m) {
   const r = el('div', 'radar sm' + (H.scan.running ? ' scan' : '')); r.append(el('i'), el('i'), el('i'), el('b'));
   const side = el('div', 'side');
   side.append(el('p', 'dim', H.scan.running ? "Looking\u2026 trying ssh with this host's key, never prompting."
-    : H.scan.at ? 'Scanned ' + clock(H.scan.at) + ': ' + H.scan.peers.length + ' of your machine' + (H.scan.peers.length === 1 ? '' : 's') + ' online, not yet added.'
+    : H.scan.at ? 'Scanned ' + clock(H.scan.at) + ': ' + H.scan.peers.length + ' machine' + (H.scan.peers.length === 1 ? '' : 's') + ' of yours found, not yet added.'
     : 'Only machines that belong to you are tried. Shared-in nodes are never touched.'));
   const sb = btn(H.scan.running ? 'Scanning\u2026' : 'Scan tailnet', 'bigbtn', startScan);
   sb.disabled = H.scan.running || !H.writes;
@@ -2304,6 +2304,8 @@ function paintDock() {
   const st = S.agent ? S.agent.status : null;
   const opt = $('optrow'), key = $('keyrow');
   opt.textContent = ''; key.textContent = '';
+  const ro = !!(S.agent && S.agent.readonly);   // a tmux pane: Shepr shows its text and sends nothing, so nothing that sends is drawn
+  $('compose').hidden = ro;
   const m = S.menu;
   opt.hidden = !(st === 'blocked' && m && m.options.length);
   if (!opt.hidden) {
@@ -2317,7 +2319,7 @@ function paintDock() {
       opt.append(b);
     });
   }
-  key.hidden = !(st === 'blocked' || st === 'working');
+  key.hidden = ro || !(st === 'blocked' || st === 'working');
   if (!key.hidden) {
     (st === 'working' ? [KEYS[3]] : KEYS).forEach((k) => key.append(btn(k[0], '', () => stageKey(k[1]))));
   }
@@ -2598,7 +2600,7 @@ function paintSlash() {
   const row = $('slashrow'), btn_ = $('slashbtn');
   const st = S.agent ? S.agent.status : null;
   // A session sitting at a dialog takes typed text INTO the dialog: a slash command makes no sense there.
-  const allowed = !!S.cur && !!S.agent && st !== 'blocked' && prefs.get('slash') === 'show';   // Settings > Slash commands
+  const allowed = !!S.cur && !!S.agent && !S.agent.readonly && st !== 'blocked' && prefs.get('slash') === 'show';   // Settings > Slash commands
   btn_.hidden = !allowed;
   const v = $('msg').value;
   const typing = /^\/\S*$/.test(v);

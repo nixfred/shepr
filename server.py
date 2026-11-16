@@ -155,11 +155,20 @@ class Session(str):
     saved machine's label."""
 
 
+class TmuxTarget(str):
+    """The `machine` of a tmux host (`shepr tmux add`): the ssh target, with `.sessions`, the only sessions it may read (empty: all
+    of them). A str, like Session, so everything that carries host["machine"] keeps working. It is READ ONLY: run_herdr refuses it,
+    so no send, key press, start or wake can ever reach a tmux host, whatever path asked."""
+    sessions = ()
+
+
 def run_herdr(machine, args, timeout=10, want_json=True):
     """Run one herdr command. machine=None is this host's plain session; a Session is another named session on this host;
     otherwise it is a saved machine label. --machine goes in front of the subcommand, never combined with --session (herdr --skill).
     --session is sent as a flag, not through HERDR_SOCKET_PATH: the flag wins over a socket path this process inherited
     (checked on herdr 0.9.5: 5 agents with --session hrtest, 18 without, with the inherited path pointing at the default)."""
+    if isinstance(machine, TmuxTarget):
+        raise HerdrError("tmux_read_only", f"{machine} is a tmux host: Shepr reads it and never sends to it")
     route = ["--session", str(machine)] if isinstance(machine, Session) else (["--machine", machine] if machine else [])
     cmd = [HERDR] + route + list(args)
     try:
@@ -234,6 +243,145 @@ def local_sessions():
     return found, read
 
 
+# --------------------------------------------------------------------------------------------
+# tmux hosts, READ ONLY. A machine that runs no herdr but has a tmux session worth watching from the phone: `shepr tmux add HOST
+# --session NAME`. Shepr asks it over ssh (the same key, a host key that is already trusted, never a prompt), lists the panes of the
+# sessions it was told about, and reads one pane's text. A pane is shown as a row that is "working" when its window printed
+# something in the last TMUX_WORKING_S seconds and "idle" otherwise. It is never "blocked" or "done", so it never goes in the queue
+# and never sends a notification, and nothing can be sent to it: run_herdr refuses a TmuxTarget (rules 2 and 3 hold by construction).
+# --------------------------------------------------------------------------------------------
+TMUX_FILE = "tmux_hosts.json"
+TMUX_SSH = os.environ.get("SHEPR_SSH") or "ssh"                         # tests put a fake here
+TMUX_WORKING_S = float(os.environ.get("SHEPR_TMUX_WORKING_S", "15"))
+TMUX_CACHE_S = 2.0                                                       # one listing serves the poll and the pane view right after it
+TMUX_TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,99}$")       # never starts with "-": ssh would read it as an option
+TMUX_SESSION_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_ -]{0,63}$")
+TMUX_FMT = "\t".join("#{%s}" % k for k in ("session_name", "window_id", "window_name", "pane_id", "pane_current_path",
+                                            "pane_current_command", "window_activity"))
+_TMUX_SEEN = {}                                                          # (target, sessions) -> (time, (agents, ws))
+_TMUX_LOCK = threading.Lock()
+
+
+def tmux_hosts():
+    """The tmux hosts saved by `shepr tmux add`: [{"id", "target", "sessions"}]. An entry that is not exactly that is skipped."""
+    try:
+        with open(state_path(TMUX_FILE)) as f:
+            rows = json.load(f)["hosts"]
+        if not isinstance(rows, list):
+            raise TypeError("hosts is not a list")
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    out, seen = [], set()
+    for r in rows[:16]:
+        if not isinstance(r, dict):
+            continue
+        hid, tgt, ses = r.get("id"), r.get("target"), r.get("sessions") or []
+        if not (isinstance(hid, str) and LABEL_RE.match(hid) and isinstance(tgt, str) and TMUX_TARGET_RE.match(tgt)
+                and isinstance(ses, list) and len(ses) <= 8 and all(isinstance(s, str) and TMUX_SESSION_RE.match(s) for s in ses)):
+            continue
+        if hid in seen or hid == LOCAL:
+            continue
+        seen.add(hid)
+        out.append({"id": hid, "target": tgt, "sessions": ses})
+    return out
+
+
+def save_tmux_hosts(rows):
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    path = state_path(TMUX_FILE)
+    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"hosts": rows}, f, indent=1)
+    os.replace(path + ".tmp", path)
+
+
+def tmux_ctl_dir():
+    """Where ssh keeps the one shared connection to a tmux host (ControlPersist): a login a poll would otherwise be, every 15 s, in
+    that machine's auth log. None when no private directory can be had: then every call is its own login."""
+    d = os.path.join(STATE_DIR, "ssh")
+    if len(d) > 60:   # a unix socket path may not pass 107 bytes, and ssh adds 41
+        d = f"/tmp/shepr-ssh-{os.getuid()}"
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        st = os.stat(d)
+        return d if st.st_uid == os.getuid() and not st.st_mode & 0o077 else None
+    except OSError:
+        return None
+
+
+def tmux_ssh(target, remote, timeout=8):
+    ctl = tmux_ctl_dir()
+    opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=yes"]
+    opts += (["-o", "ControlMaster=auto", "-o", f"ControlPath={ctl}/%C", "-o", "ControlPersist=120"] if ctl
+             else ["-o", "ControlMaster=no", "-o", "ControlPath=none"])
+    try:
+        rc, out, err = bounded_run([TMUX_SSH] + opts + ["--", str(target), remote], timeout)
+    except subprocess.TimeoutExpired:
+        raise HerdrError("timeout", f"ssh to {target} took longer than {timeout}s")
+    except FileNotFoundError:
+        raise HerdrError("no_ssh", "ssh not found")
+    if rc != 0:
+        lines = [l.strip() for l in (err or out).splitlines()
+                 if l.strip() and not l.lstrip().startswith(("**", "#", "Warning:", "WARNING"))]
+        raise HerdrError("tmux", (lines[-1] if lines else f"ssh exited {rc}")[:160])
+    return out
+
+
+def tmux_panes(machine, fresh=False):
+    """(agents, ws) of a tmux host: every pane of the sessions it may read, shaped like herdr's agent list so the rest of Shepr
+    needs no second path. The pane id is "w<window>:p<pane>" from tmux's @window and %pane numbers, which keeps it a legal Shepr
+    pane id; the session's name is the workspace label, which is what the phone calls it."""
+    key = (str(machine), tuple(machine.sessions))
+    with _TMUX_LOCK:
+        hit = _TMUX_SEEN.get(key)
+    if hit and not fresh and time.time() - hit[0] < TMUX_CACHE_S:
+        return hit[1]
+    tail = ' && printf \'NOW %s\\n\' "$(date +%s)"'
+    scopes = [["-s", "-t", "=" + s] for s in machine.sessions] or [["-a"]]
+    now, agents, ws = None, [], {}
+    for scope in scopes:
+        out = tmux_ssh(machine, "tmux list-panes " + " ".join(shlex.quote(x) for x in scope) + " -F " + shlex.quote(TMUX_FMT) + tail)
+        for line in out.splitlines():
+            if line.startswith("NOW "):
+                try:
+                    now = int(line[4:])   # that machine's own clock: the activity stamps are on it, not on ours
+                except ValueError:
+                    pass
+                continue
+            f = line.split("\t")
+            if len(f) != 7 or not re.fullmatch(r"@\d+", f[1]) or not re.fullmatch(r"%\d+", f[3]):
+                continue
+            ses, wid, wname, pid, path, cmd, act = f
+            try:
+                act = int(act)
+            except ValueError:
+                act = 0
+            w = "w" + wid[1:]
+            ws[w] = clean_text(ses)[:64]
+            agents.append({"pane_id": f"{w}:p{pid[1:]}", "agent": "tmux", "agent_status": "idle", "state_change_seq": None,
+                           "terminal_title": clean_text(f"{wname} ({cmd})")[:120], "cwd": clean_text(path)[:300],
+                           "workspace_id": w, "focused": False, "_act": act})
+    now = now if now is not None else int(time.time())
+    for a in agents:
+        act = a.pop("_act")
+        a["agent_status"] = "working" if act and now - act <= TMUX_WORKING_S else "idle"
+    res = (agents, ws)
+    with _TMUX_LOCK:
+        _TMUX_SEEN[key] = (time.time(), res)
+    return res
+
+
+def tmux_tail(machine, pane, lines, max_bytes):
+    m = re.fullmatch(r"w\d+:p(\d+)", pane)
+    if not m:
+        raise HerdrError("bad_pane", "not a pane id")
+    if not any(a["pane_id"] == pane for a in tmux_panes(machine)[0]):   # only a pane of a session it was told about, never an id made up
+        raise HerdrError("no_pane", "that pane is not in a session Shepr may read")
+    out = tmux_ssh(machine, "tmux capture-pane -p -J -t " + shlex.quote("%" + m.group(1)) + " -S " + shlex.quote("-" + str(int(lines))),
+                   timeout=10)
+    return _tail_text(out, lines, max_bytes)
+
+
 def discover_hosts():
     """Every saved herdr machine, this host, and the other running herdr sessions on this host. Sets _tls.listed: True only
     when the saved-machine list was really read, and _tls.sessions_listed: True only when the session list was. They are
@@ -243,13 +391,17 @@ def discover_hosts():
     thread's good read can never vouch for this thread's failed one."""
     _tls.listed = _tls.sessions_listed = False
     hosts = [{"id": LOCAL, "machine": None, "kind": "local", "enabled": True}]
+    for t in tmux_hosts():   # saved in this server's own state folder, so a test's isolated folder keeps SHEPR_LOCAL_ONLY honest
+        tt = TmuxTarget(t["target"])
+        tt.sessions = tuple(t["sessions"])
+        hosts.append({"id": t["id"], "machine": tt, "kind": "tmux", "enabled": True})
     if os.environ.get("SHEPR_LOCAL_ONLY"):   # tests: never read real remote machines or other sessions, so one being up or down cannot change a result
         return hosts
     machines_read = True
     try:
         for m in run_herdr(None, ["machine", "list", "--json"], timeout=6):
             label = m.get("label") or m.get("id")
-            if label and label != LOCAL:
+            if label and label != LOCAL and all(h["id"] != label for h in hosts):   # a name already taken by a tmux host stays that host
                 hosts.append({"id": label, "machine": label, "kind": "remote", "enabled": bool(m.get("enabled"))})
     except HerdrError:
         machines_read = False
@@ -304,16 +456,27 @@ def clean_text(s):
     return CTRL_RE.sub("", ANSI_RE.sub("", s)).replace("\r", "")
 
 
-def read_tail(host, pane, lines, max_bytes=TAIL_MAX_BYTES):
-    out = run_herdr(host["machine"], ["agent", "read", pane, "--source", "recent-unwrapped",
-                                      "--lines", str(lines)], timeout=10 if lines <= 200 else 20, want_json=False)
+def _tail_text(out, lines, max_bytes):
     text = clean_text(out).rstrip()
     ls = text.split("\n")[-lines:]
     text = "\n".join(l[:600] for l in ls)
     return text[-max_bytes:]
 
 
+def read_tail(host, pane, lines, max_bytes=TAIL_MAX_BYTES):
+    if isinstance(host["machine"], TmuxTarget):
+        return tmux_tail(host["machine"], pane, lines, max_bytes)
+    out = run_herdr(host["machine"], ["agent", "read", pane, "--source", "recent-unwrapped",
+                                      "--lines", str(lines)], timeout=10 if lines <= 200 else 20, want_json=False)
+    return _tail_text(out, lines, max_bytes)
+
+
 def get_agent(host, pane):
+    if isinstance(host["machine"], TmuxTarget):
+        for a in tmux_panes(host["machine"])[0]:
+            if a["pane_id"] == pane:
+                return dict(a)
+        raise HerdrError("no_pane", "that pane is not in a session Shepr may read")
     r = run_herdr(host["machine"], ["agent", "get", pane], timeout=8)
     return r["result"]["agent"]
 
@@ -739,8 +902,22 @@ def poll_host(host):
         return host, None, {}, f"bad_response: {type(e).__name__}: {e}"
 
 
+def _poll_tmux(host, now):
+    try:
+        agents, ws = tmux_panes(host["machine"], fresh=True)
+    except HerdrError as e:
+        return host, None, {}, f"{e.code}: {e.message}"
+    ASLEEP_N[host["id"]] = 0
+    agents = [dict(a) for a in agents]
+    with LOCK:
+        note_seen(host, agents, now, ws)
+    return host, agents, ws, None
+
+
 def _poll_host(host):
     now = time.time()
+    if isinstance(host["machine"], TmuxTarget):
+        return _poll_tmux(host, now)
     try:
         agents = run_herdr(host["machine"], ["agent", "list"], timeout=9)["result"]["agents"]
     except HerdrError as e:
@@ -785,7 +962,7 @@ def _publish():
             if e:
                 hosts.append(e["entry"]); agents.extend(e["agents"])
         SNAP.update(ts=time.time(), hosts=hosts, agents=agents, polls=SNAP["polls"] + 1)
-        fleet_watch(agents, hosts, SNAP["ts"])
+        fleet_watch([a for a in agents if not a.get("readonly")], hosts, SNAP["ts"])   # a pane that is only watched is no work to wait for
         events = PUSH_EVENTS[:]; PUSH_EVENTS.clear()
     if events:
         threading.Thread(target=dispatch_push, args=(events,), daemon=True).start()
@@ -847,6 +1024,7 @@ def shape_agent(host, a, ws):
     cwd = a.get("cwd") or a.get("foreground_cwd") or ""
     sess = (a.get("agent_session") or {}).get("value") or ""
     return {
+        **({"readonly": True} if host.get("kind") == "tmux" else {}),   # the phone hides every control that would send
         "host": host["id"], "pane": a["pane_id"], "agent": a.get("agent") or "?",
         "status": a["agent_status"], "seq": a.get("state_change_seq"),
         "title": a.get("terminal_title_stripped") or a.get("terminal_title") or a["pane_id"],
@@ -1026,6 +1204,15 @@ def need_host(hid):
     raise HerdrError("bad_host", f"unknown or unreachable host {hid!r}")
 
 
+def need_write_host(hid):
+    """The host to send to. A tmux host is read only, so it is refused here, at prepare, where the phone can say so, not at the end of a
+    sheet that was never going to work (run_herdr refuses it too, as the last wall)."""
+    h = need_host(hid)
+    if h.get("kind") == "tmux":
+        raise HerdrError("tmux_read_only", f"{hid} is a tmux host: Shepr reads it and never sends to it")
+    return h
+
+
 CLAUDE_MODELS = ("fable", "opus", "sonnet", "haiku")
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
@@ -1060,7 +1247,7 @@ def build_plan(body):
     if kind not in ("text", "keys", "choose", "multi", "model", "effort", "sendnow"):
         raise HerdrError("bad_kind", f"this host's Shepr does not know the action {str(kind)[:30]!r}. It is older than the app on your "
                                      "phone: restart Shepr on the host so the two match.")
-    host = need_host(str(body.get("host", "")))
+    host = need_write_host(str(body.get("host", "")))
     pane = str(body.get("pane", ""))
     if not PANE_RE.match(pane):
         raise HerdrError("bad_pane", "not a pane id")
@@ -1743,6 +1930,7 @@ SCAN_EVERY_S = max(60.0, float(os.environ.get("SHEPR_SCAN_S", "300")))
 AUTOADD_MAX = 5                                              # machines one scan may add, so a surprise cannot add a whole tailnet
 AUTOADD_RETRY_S = 3600                                       # a failed add is not tried again for this long
 RECHECK_S = {"noherdr": 3600, "nokey": 3600, "hostkey": 3600}  # a background scan does not log in again to a node that answered this
+LAN_RECHECK_S = dict(RECHECK_S, down=1800)                   # a LAN device that takes the connection and never logs in (a printer, a camera) is not asked every scan
 SCAN_MEMO = {}                                               # peer name -> (time, state, detail, running)
 AUTO_FAILED = {}                                             # peer name -> time of its last failed automatic add
 
@@ -1829,16 +2017,103 @@ def tailnet_peers():
     return sorted(out, key=lambda x: x["name"])
 
 
+# The LAN scan (opt in): SHEPR_SCAN_NETS="192.168.1.0/24" also looks at that range for machines that answer on ssh's port. A tailnet says whose a
+# node is, a LAN does not, so nothing here is taken on trust: the machine must already trust this host's key AND be one whose host key this
+# host already knows (ssh_probe, StrictHostKeyChecking=yes: an unknown machine is shown as "first connect" and never offered a key). Only
+# private ranges, none bigger than a /22, and none of them is scanned unless the owner named it.
+SCAN_NETS_MAX = 1024
+LAN_PORT_S = 0.6
+_PRIVATE = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8")]
+
+
+def parse_scan_nets(text):
+    """SHEPR_SCAN_NETS -> [IPv4Network]. A range that is not private IPv4, or has more than 1024 addresses, or is not a range at all is
+    said once on stderr and left out, so a typo cannot turn into a sweep of a network that is not yours."""
+    nets = []
+    for tok in re.split(r"[,\s]+", (text or "").strip()):
+        if not tok:
+            continue
+        try:
+            n = ipaddress.ip_network(tok, strict=False)
+        except ValueError:
+            print(f"shepr: SHEPR_SCAN_NETS: {tok!r} is not a network, left out", file=sys.stderr)
+            continue
+        if n.version != 4 or not any(n.subnet_of(p) for p in _PRIVATE) or n.num_addresses > SCAN_NETS_MAX:
+            print(f"shepr: SHEPR_SCAN_NETS: {tok!r} is not a private IPv4 range of at most {SCAN_NETS_MAX} addresses, left out", file=sys.stderr)
+            continue
+        if n not in nets:
+            nets.append(n)
+    return nets[:4]
+
+
+SCAN_NETS = parse_scan_nets(os.environ.get("SHEPR_SCAN_NETS"))
+
+
+def lan_port_open(ip, port=22):
+    try:
+        with socket.create_connection((ip, port), timeout=LAN_PORT_S):
+            return True
+    except OSError:
+        return False
+
+
+def lan_name(ip):
+    """(name, ssh target) of a LAN machine: its DNS name when that name leads back to the same address (so the target cannot be
+    somebody else's), otherwise lan-10-0-0-5 and the address itself."""
+    try:
+        short = re.sub(r"[^a-z0-9_-]", "-", socket.gethostbyaddr(ip)[0].split(".")[0].lower()).strip("-")[:24]
+        if LABEL_RE.match(short) and ip in {a[4][0] for a in socket.getaddrinfo(short, None, socket.AF_INET)}:
+            return short, short
+    except OSError:
+        pass
+    return "lan-" + ip.replace(".", "-"), ip
+
+
+def lan_peers(skip=()):
+    """The machines on the named LAN ranges that answer on port 22 and are not this host, not saved (as a herdr machine or a tmux host),
+    and not already a tailnet peer (`skip`: its names). Shaped like tailnet_peers' answers, with via="lan"."""
+    if not SCAN_NETS:
+        return []
+    own = set(iface_addrs())
+    ips = [str(ip) for n in SCAN_NETS for ip in n.hosts() if str(ip) not in own]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=64) as ex:
+        up = [ip for ip, o in zip(ips, ex.map(lan_port_open, ips)) if o]
+    taken = set(skip) | {LOCAL}
+    for m in machine_profiles():
+        taken |= {m.get("label"), m.get("target")}
+    for t in tmux_hosts():
+        taken |= {t["id"], t["target"]}
+    out = []
+    for ip in up:
+        name, target = lan_name(ip)
+        if {name, target, ip} & taken:
+            continue
+        taken.add(name)
+        out.append({"name": name, "dns": "", "os": "lan", "ip": ip, "target": target, "via": "lan"})
+    return sorted(out, key=lambda x: ipaddress.ip_address(x["ip"]))
+
+
 def scan_tailnet(force=True):
-    """Probe the online nodes that belong to you. `force` (the Hosts tab's Scan button) asks every one afresh; a background scan
+    """Probe the online nodes that belong to you (and, with SHEPR_SCAN_NETS, the machines on those LAN ranges). `force` (the Hosts tab's Scan button) asks every one afresh; a background scan
     reuses a recent "no herdr / needs key / first connect" so it does not log in to the same node every few minutes for nothing."""
     try:
-        peers = tailnet_peers()
+        try:
+            peers = tailnet_peers()
+        except Exception as e:
+            if not SCAN_NETS:
+                raise
+            print(f"shepr: tailnet scan failed: {e!r}", file=sys.stderr)   # the LAN is still worth scanning with Tailscale down
+            peers = []
+        if SCAN_NETS:
+            try:
+                peers += lan_peers({p["name"] for p in peers})
+            except Exception as e:
+                print(f"shepr: LAN scan failed: {e!r}", file=sys.stderr)
         now = time.time()
         todo, answers = [], {}
         for p in peers:
             m = SCAN_MEMO.get(p["name"])
-            if not force and m and now - m[0] < RECHECK_S.get(m[1], 0):
+            if not force and m and now - m[0] < (LAN_RECHECK_S if p.get("via") == "lan" else RECHECK_S).get(m[1], 0):
                 answers[p["name"]] = m
             else:
                 todo.append(p)
@@ -1904,7 +2179,9 @@ def autoscan_loop():
                 scan_tailnet(force=False)   # clears SCAN["running"] itself
                 with LOCK:
                     n, asked, up = len(SCAN["peers"]), SCAN.get("probed", 0), sum(1 for p in SCAN["peers"] if p.get("running") is True)
-                print(f"shepr: tailnet scan: {n} unsaved nodes online, {asked} asked, {up} running herdr", file=sys.stderr, flush=True)
+                lan = sum(1 for p in SCAN["peers"] if p.get("via") == "lan")
+                print(f"shepr: tailnet scan: {n} unsaved nodes online, {asked} asked, {up} running herdr" + (f" ({lan} of the {n} on the LAN)" if SCAN_NETS else ""),
+                      file=sys.stderr, flush=True)
         except Exception as e:
             print(f"shepr: automatic scan failed: {e!r}", file=sys.stderr)
         time.sleep(SCAN_EVERY_S)
@@ -1931,6 +2208,11 @@ def hosts_view():
         saved.append({"id": m.get("label"), "profile": m.get("id"), "kind": "remote", "enabled": bool(m.get("enabled")),
                       "target": m.get("target"), "status": st.get("status"), "error": st.get("error"), "last_ok": st.get("last_ok"),
                       "counts": st.get("counts", {})})
+    for t in tmux_hosts():   # tmux hosts: read only, so no switch (the CLI adds and removes them)
+        st = status.get(t["id"]) or {}
+        if all(x["id"] != t["id"] for x in saved):
+            saved.append({"id": t["id"], "kind": "tmux", "enabled": True, "target": t["target"], "sessions": t["sessions"],
+                          "status": st.get("status"), "error": st.get("error"), "last_ok": st.get("last_ok"), "counts": st.get("counts", {})})
     for name, _route in local_sessions()[0]:   # the other running herdr sessions on this machine: listed, never switched (they are not saved machines)
         hid = f"{LOCAL}/{name}"
         st = status.get(hid) or {}
@@ -2250,7 +2532,7 @@ def pane_idle_shell(host, pane):
 
 
 def plan_start(body):
-    host = need_host(str(body.get("host", "")))
+    host = need_write_host(str(body.get("host", "")))
     pane = str(body.get("pane", ""))
     if not PANE_RE.match(pane):
         raise HerdrError("bad_pane", "not a pane id")
@@ -2340,7 +2622,7 @@ def alias_expansion(name):
 
 
 def plan_new_project(body):
-    host = need_host(str(body.get("host", "")))
+    host = need_write_host(str(body.get("host", "")))
     name = body.get("name")
     if not isinstance(name, str) or CTRL_RE.search(name) or "\n" in name:
         raise HerdrError("bad_name", "the project name must be plain text on one line")
@@ -2458,7 +2740,7 @@ def folders_view(host):
 def plan_open_folder(body):
     """Open a folder that already exists as a new herdr project and start Claude or Codex in it. It never creates the folder, and
     nothing in it is touched: a folder that is not there is refused, with no mkdir anywhere in the command."""
-    host = need_host(str(body.get("host", "")))
+    host = need_write_host(str(body.get("host", "")))
     if host["kind"] != "local":
         raise HerdrError("local_only", "opening an existing folder only works on the machine Shepr runs on")
     d = body.get("dir")
@@ -2846,7 +3128,8 @@ LIVE = shepr_live.Live(STATE_DIR, ecdsa_sign, LOCAL, valid=lambda: set(devices()
 def build_live_status(now=None):
     now = now if now is not None else time.time()
     q = build_queue()
-    return shepr_live.build_status(q["agents"], q["hosts"], shepr_live.meters_from_view(budget_view()), now)
+    return shepr_live.build_status([a for a in q["agents"] if not a.get("readonly")], q["hosts"],
+                                   shepr_live.meters_from_view(budget_view()), now)
 
 
 def live_call(fn):
@@ -4540,6 +4823,59 @@ def cli_status(a):
     return 0
 
 
+def cli_tmux(a):
+    """shepr tmux add HOST [--session NAME]... [--label ID] | list | remove ID. Needs no running server: the next poll reads the file."""
+    rows = tmux_hosts()
+    if a.tmux_cmd == "list":
+        if not rows:
+            print("no tmux hosts. Add one: shepr tmux add HOST --session NAME")
+        for r in rows:
+            print(f"{r['id']:<14} ssh {r['target']:<24} " + ("sessions: " + ", ".join(r["sessions"]) if r["sessions"] else "every session"))
+        return 0
+    if a.tmux_cmd == "remove":
+        if not any(r["id"] == a.id for r in rows):
+            print(f"shepr: no tmux host called {a.id!r}", file=sys.stderr)
+            return 1
+        save_tmux_hosts([r for r in rows if r["id"] != a.id])
+        print(f"removed {a.id}. It leaves the phone at the next poll. Nothing was changed on that machine.")
+        return 0
+    target = a.target
+    label = (a.label or target.split("@")[-1].split(".")[0]).lower()
+    sessions = list(dict.fromkeys(a.session or []))
+    if not TMUX_TARGET_RE.match(target):
+        print("shepr: the host must be an ssh name (letters, digits, . _ @ -), not starting with -", file=sys.stderr)
+        return 1
+    if not LABEL_RE.match(label) or label == LOCAL:
+        print(f"shepr: {label!r} cannot be its name here: lowercase letters, digits, - and _, up to 24, not this machine's own. Use --label.", file=sys.stderr)
+        return 1
+    bad = [s for s in sessions if not TMUX_SESSION_RE.match(s)]
+    if bad or len(sessions) > 8:
+        print(f"shepr: not a tmux session name: {bad[0]!r}" if bad else "shepr: at most 8 sessions", file=sys.stderr)
+        return 1
+    if any(r["id"] == label for r in rows):
+        print(f"shepr: {label} is already a tmux host. `shepr tmux remove {label}` first to change it.", file=sys.stderr)
+        return 1
+    if any((m.get("label") or m.get("id")) == label for m in machine_profiles()):
+        print(f"shepr: {label} is already a saved herdr machine. Pick another name with --label.", file=sys.stderr)
+        return 1
+    tt = TmuxTarget(target)
+    tt.sessions = tuple(sessions)
+    try:   # prove it works before saving it: one read, the same one the phone's poll makes
+        agents, _ws = tmux_panes(tt, fresh=True)
+    except HerdrError as e:
+        print(f"shepr: could not read tmux on {target}: {e.message}", file=sys.stderr)
+        if "host key" in e.message.lower():
+            print(f"       first connect needed: run `ssh {target}` once and check the fingerprint. Shepr never trusts a new host key itself.", file=sys.stderr)
+        return 1
+    if not agents:
+        print(f"shepr: {target} answered, but " + ("those sessions have no panes." if sessions else "it has no tmux panes."), file=sys.stderr)
+        return 1
+    save_tmux_hosts(rows + [{"id": label, "target": target, "sessions": sessions}])
+    print(f"added {label} (ssh {target}): {len(agents)} pane{'s' if len(agents) != 1 else ''} in " + (", ".join(sessions) if sessions else "every session")
+          + ". Read only: Shepr shows the text and sends nothing. It appears on the phone at the next poll.")
+    return 0
+
+
 def cli_devices(a):
     devs = devices()
     if not devs:
@@ -4806,7 +5142,7 @@ class Front:
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] in ("pair", "devices", "revoke", "status", "fix-boot", "live"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("pair", "devices", "revoke", "status", "fix-boot", "live", "tmux"):
         ap = argparse.ArgumentParser(prog="shepr")
         sub = ap.add_subparsers(dest="cmd", required=True)
         p = sub.add_parser("pair", help="show a QR that pairs one phone, then wait for it")
@@ -4826,13 +5162,20 @@ def main():
         ls.add_parser("status", help="is Apple push set up, and which phones have a card")
         ls.add_parser("test", help="send a test card to every running card, to prove the Apple path works")
         s4 = ls.add_parser("forget", help="drop a phone's Live Activity tokens"); s4.add_argument("who")
+        tx = sub.add_parser("tmux", help="watch a tmux session on another machine, read only: add, list, remove")
+        ts = tx.add_subparsers(dest="tmux_cmd", required=True)
+        t1 = ts.add_parser("add", help="add a machine over ssh; it must already trust this host's key and host key")
+        t1.add_argument("target", metavar="HOST"); t1.add_argument("--session", action="append", metavar="NAME", help="a tmux session to show (repeat for more; none: all of them)")
+        t1.add_argument("--label", help="its name on the phone (default: the host's short name)")
+        ts.add_parser("list", help="the tmux hosts and the sessions each may show")
+        t3 = ts.add_parser("remove", help="stop showing one (nothing is changed on that machine)"); t3.add_argument("id")
         a = ap.parse_args()
-        if a.cmd not in ("status", "fix-boot", "live", "pair"):
+        if a.cmd not in ("status", "fix-boot", "live", "pair", "tmux"):
             learn_tailnet()   # status only reads, and a bar widget polls it, so it skips the tailscale call. pair takes the URL from the running
                               # server's server.json and never checks a request, so with Tailscale off it would only print the server's own
                               # "tailnet requests will be refused" ahead of the real answer (tailscale_problem)
         sys.exit({"pair": cli_pair, "devices": cli_devices, "revoke": cli_revoke, "status": cli_status,
-                  "fix-boot": cli_fix_boot, "live": cli_live}[a.cmd](a))
+                  "fix-boot": cli_fix_boot, "live": cli_live, "tmux": cli_tmux}[a.cmd](a))
 
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("port", nargs="?", type=int, default=8742)

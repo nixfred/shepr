@@ -1,6 +1,17 @@
 Shepr change log. Newest first.
 Every outside contribution is listed with the contributor's GitHub profile and, when one could be verified, their X profile.
 
+2026-11-16  app and server  tmux sessions on a machine without herdr, and a LAN scan
+  `shepr tmux add HOST --session NAME`: a tmux session on another machine, read only. Its panes are rows in the lists (working when the window
+      printed in the last 15 s, idle otherwise; never blocked, so never a question, a notification, or a count on the Lock Screen card), and a
+      pane opens to its text. Nothing can be sent to it: no box, keys or Send are drawn, the server refuses a send at prepare, and `run_herdr`
+      refuses it as a last wall. It runs only `tmux list-panes` and `tmux capture-pane` over ssh (key, no prompt, a host key already trusted,
+      the session named exactly, one shared connection kept two minutes). `shepr tmux list` and `remove` too.
+  `SHEPR_SCAN_NETS=192.168.1.0/24`: the scan also looks at a LAN range you name (private IPv4, at most a /22, up to four), asks every address
+      that answers on port 22 with the same strict probe as a tailnet node, and offers the result in the Hosts tab. A machine whose host key is
+      not known yet is `first connect`, never offered a key. Off unless set. The Hosts summary now says "found", not "online".
+      `tests/tmux_test.py` (64 checks), `tests/lan_scan_test.py` (32), `tests/tmux_ui.mjs`. The shell is v50.
+
 2026-11-15  server only  the host serves
   `server.py PORT --tailnet`: Shepr serves its tailnet address itself, with nothing in front. It listens on the node's own tailnet
       addresses, tied to the Tailscale interface (a packet that arrives over the LAN finds nothing), speaks TLS with the certificate

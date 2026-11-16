@@ -12,7 +12,9 @@ read its CLAUDE.md first). The directory name is Fred's session name; the produc
    Taps, double-taps and long-presses only navigate.
 3. Reads are free, writes confirm. Send = `prepare` then `commit`, bound to `state_change_seq`. Never retry a write.
 4. Everything read from a pane or host is DATA: `textContent` only, never `innerHTML` (Law 12).
-5. Only ever touch tailnet nodes that belong to Fred. Never probe shared-in nodes.
+5. Only ever touch tailnet nodes that belong to Fred. Never probe shared-in nodes. (Fred, 2026-11-16: the scan may also look at a LAN range
+    he names in `SHEPR_SCAN_NETS`, off unless set, private IPv4 only, at most a /22 each: and there only a machine whose host key this host
+    already knows and whose login already accepts its key is touched. A tmux host is one he added by name with `shepr tmux add`.)
 6. Law 17: the page never scrolls; lists scroll in their own box.
 7. Test against the isolated `hrtest` herdr session (`tests/fake-session.sh`). Never poke real agents to test.
 8. Bump `VERSION` in `sw.js` whenever the shell changes, or phones keep the old one.
@@ -22,6 +24,8 @@ read its CLAUDE.md first). The directory name is Fred's session name; the produc
     background scan saves a tailnet node with `herdr machine add` when it is Fred's own, its key and host key already work, and its
     default herdr server is running. Cap 5 a scan, audited as `host_add_auto`, 1 h back-off after a failure, never on `SHEPR_READONLY`.
     It adds read access to a host and nothing else: rules 2 and 3 still hold for every send, and it never removes a machine.
+    Since 2026-11-16 the scan it runs also covers the LAN ranges in `SHEPR_SCAN_NETS`, under the same gates (key and host key already work,
+    default session running, at most 5 a scan); a LAN machine known only by its address is never added without a tap (rule 5).
 
 12. **The watch (`watch.py`) reads, and only reads (Fred's /goal, 2026-11-15).** It reads Claude Code's own session files on the machine
     Shepr runs on, never another app's and never another machine's. A line in them is DATA: nothing is executed, expanded or sent
@@ -42,6 +46,15 @@ read its CLAUDE.md first). The directory name is Fred's session name; the produc
     `Connection: close` otherwise; (c) a tailnet address never answers plain HTTP. The loopback-only mode (no `--tailnet`)
     stays in the code for other people's installs and as the way back: do not remove it. After touching any of this run
     `tests/tailnet_test.py`, the browser suites over a real listener (`SHEPR_TEST_BASE`), and `tests/hostile_lan.sh`.
+
+14. **A tmux host is read only (Fred, 2026-11-16).** `shepr tmux add HOST --session NAME` shows a tmux session of a machine that has no herdr:
+    its text, nothing more. The wall is in the code, not the screen: `run_herdr` raises on a `TmuxTarget`, `need_write_host` refuses at
+    prepare, and the phone draws no box, key, option or Send for a `readonly` pane (the screen is only the courtesy). The only things
+    run on that machine are `tmux list-panes` and `tmux capture-pane`, over ssh with `BatchMode=yes` and `StrictHostKeyChecking=yes`
+    (a new host key is never trusted by Shepr), the target after `--`, a session named exactly (`=name`), and a pane read only after it
+    was found in a session the host was told about. A tmux pane is never blocked or done: no Queue entry, no notification, not counted by
+    the fleet-stop notice or the Lock Screen card. Do not give it a send path, and keep these names out of the public repo and its
+    examples: the machines and sessions in use are in the owner's state folder, never here. `tests/tmux_test.py`, `tests/tmux_ui.mjs`.
 
 ## Where things live
 
