@@ -1080,6 +1080,23 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     check('hosts: every session row carries a coloured pill naming its machine, and the second machine\'s session is in the same list', hh.items > 1 && hh.pills.every((p) => p === 'gus' || p === 'vic') && hh.pills.includes('vic') && hh.pills.includes('gus'));
     check('hosts: the two machines get different colours', await page.evaluate(() => { const c = (t) => getComputedStyle([...document.querySelectorAll('#main .hpill')].find((p) => p.textContent === t)).color; return c('gus') !== c('vic'); }));
     await page.screenshot({ path: `${OUT}/h1-queue-all-hosts.png` });
+    // a chip left on (it is remembered between launches) must not make the Queue say "Nothing needs you" while sessions wait elsewhere
+    await page.evaluate(() => { const S = window.shepr; S.S.q.hosts.push({ id: 'lab', kind: 'remote', status: 'ok', counts: {}, asleep: 11 }); S.S.host = 'lab'; S.S.tab = 'waiting'; S.paintMain(); });
+    const fs = await page.evaluate(() => { const s = document.getElementById('filterstrip'), e = document.querySelector('#main .empty > b'); return { strip: s ? s.textContent : null, empty: e ? e.textContent : null, items: document.querySelectorAll('#main .item').length }; });
+    console.log('   filter on a quiet host:', JSON.stringify(fs));
+    check('hosts: a chip left on that hides waiting sessions says so, naming the chip and the machines they are on', !!fs.strip && /ONLY LAB IS SHOWN/.test(fs.strip) && /\d+ more need/.test(fs.strip) && /gus/.test(fs.strip) && /vic/.test(fs.strip));
+    check('hosts: and the empty Queue names the machine it is empty on instead of claiming nothing needs you anywhere', fs.empty === 'Nothing needs you on lab.' && fs.items === 0);
+    await page.screenshot({ path: `${OUT}/h2-filter-hides-waiting.png` });
+    await page.click('#filterstrip .mini-btn'); await page.waitForTimeout(300);
+    check('hosts: "Show all" clears the chip, remembers that, and the waiting sessions are back', await page.evaluate(() => window.shepr.S.host === null && JSON.parse(localStorage.getItem('shepr.host')) === null && !document.getElementById('filterstrip') && document.querySelectorAll('#main .item').length > 1));
+    await page.evaluate(() => { const S = window.shepr; S.S.host = 'gus'; S.paintMain(); });
+    check('hosts: a chip that hides only the other machine\'s one waiting session says "1 more needs you on vic"', await page.evaluate(() => { const s = document.getElementById('filterstrip'); return !!s && /ONLY GUS IS SHOWN/.test(s.textContent) && /1 more needs you on vic/.test(s.textContent); }));
+    await page.evaluate(() => { const S = window.shepr; S.S.host = null; S.paintMain(); });
+    check('hosts: with no chip on there is no such notice', await page.evaluate(() => !document.getElementById('filterstrip')));
+    // a machine name is data (Law 12): it is text in the notice, never markup
+    await page.evaluate(() => { const S = window.shepr; S.S.q.hosts.push({ id: '<i id=pwn>x</i>', kind: 'remote', status: 'ok', counts: {}, asleep: 0 }); S.S.host = '<i id=pwn>x</i>'; S.paintMain(); });
+    check('hosts: a machine name with markup in it is drawn as text in the notice', await page.evaluate(() => !document.getElementById('pwn') && /ONLY <I ID=PWN>X<\/I> IS SHOWN/.test(document.getElementById('filterstrip').textContent)));
+    await page.evaluate(() => { const S = window.shepr; S.S.host = null; });
     await page.evaluate(() => { const S = window.shepr; S.S.q.hosts.splice(0, S.S.q.hosts.length, ...S.keepHosts); S.S.q.agents.splice(0, S.S.q.agents.length, ...S.keepAgents); S.paintMain(); });
     // a phone that had the old per-host filter saved starts combined, once
     await page.evaluate(() => { localStorage.removeItem('shepr.all2'); localStorage.setItem('shepr.host', JSON.stringify('gus')); });

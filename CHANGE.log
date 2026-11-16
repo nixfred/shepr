@@ -1,6 +1,12 @@
 Shepr change log. Newest first.
 Every outside contribution is listed with the contributor's GitHub profile and, when one could be verified, their X profile.
 
+2026-11-16  app  a host chip that hides waiting sessions now says so
+  The host chips (All hosts, gus, vic, ...) are remembered between launches. One left on a machine with nothing waiting made the Queue say
+      "Nothing needs you." while the badge, the Queue tab and "Waiting now" (all of them count every machine) said 2. The Queue now shows a notice
+      above the list whenever the chip on hides sessions that wait on you: "ONLY LAB IS SHOWN, 2 more need you on gus, vic" with a "Show all"
+      button that clears the chip. An empty Queue under a chip says "Nothing needs you on lab." The name is drawn as text, never markup.
+
 2026-11-16  app and server  tmux sessions on a machine without herdr, and a LAN scan
   `shepr tmux add HOST --session NAME`: a tmux session on another machine, read only. Its panes are rows in the lists (working when the window
       printed in the last 15 s, idle otherwise; never blocked, so never a question, a notification, or a count on the Lock Screen card), and a

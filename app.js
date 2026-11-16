@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v50';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v51';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -578,11 +578,11 @@ function paintMain() {
       m.append(nb);
       const lg = ledgerStrip(); if (lg) m.append(lg);
     }
-    [stoppedStrip(), catchUpCard(), pushNudge(), activityStrip()].forEach((n) => { if (n) m.append(n); });
+    [filterStrip(), stoppedStrip(), catchUpCard(), pushNudge(), activityStrip()].forEach((n) => { if (n) m.append(n); });
     if (!w.length && !d.length) {
       const e = el('div', 'empty');
       const r = el('div', 'radar tiny'); r.append(el('i'), el('i'), el('i'), el('b'));
-      e.append(r, el('b', null, 'Nothing needs you.'));
+      e.append(r, el('b', null, 'Nothing needs you' + (S.host ? ' on ' + S.host : '') + '.'));
       m.append(e);
     }
     if (w.length) { m.append(section('Needs you \u00b7 longest first', w.length)); w.forEach((a, i) => m.append(itemNode(a, 'waiting', false, i))); }
@@ -954,6 +954,18 @@ function stoppedStrip() {
   if (!f || f.working || !f.stopped_at || !(f.blocked || f.done)) return null;
   const n = strip('stopped', 'stopped'), secs = Math.max(0, S.q.now - f.stopped_at);
   n.append(el('b', null, 'EVERYTHING HAS STOPPED'), el('span', null, (secs >= 60 ? fmtAge(secs, true).main + ' ago · ' : '') + [f.blocked ? f.blocked + ' waiting on you' : '', f.done ? f.done + ' finished' : ''].filter(Boolean).join(', ')));
+  return n;
+}
+
+// ---- a host chip is on and it hides sessions that wait on you. The filter is remembered between launches, so without this the list
+// said "Nothing needs you" while the badge said 2 (one chip left on by accident looks like an empty Queue).
+function filterStrip() {
+  if (!S.host || !S.q) return null;
+  const hid = agents().filter((a) => a.status === 'blocked' && !inHost(a));
+  if (!hid.length) return null;
+  const n = strip('nudge', 'filterstrip'), t = el('div', 'st');
+  t.append(el('b', null, 'ONLY ' + S.host.toUpperCase() + ' IS SHOWN'), el('span', null, hid.length + ' more ' + (hid.length === 1 ? 'needs' : 'need') + ' you on ' + [...new Set(hid.map((a) => a.host))].join(', ')));
+  n.append(t, btn('Show all', 'mini-btn', () => { S.host = null; store.set('shepr.host', null); S.shown.clear(); render(); }));
   return n;
 }
 
