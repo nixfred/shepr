@@ -487,6 +487,16 @@ TRUST_SENT = {}    # (host, pane) -> time Shepr pressed trust there; never press
 TRUST_RETRY_S = 600.0
 
 
+def trust_menu_in(screen, m=None):
+    """The trust dialog's menu if this screen shows it, else None. m: the screen's menu when the caller already parsed it."""
+    text = "\n".join(screen.split("\n")[-22:])   # the dialog is the whole bottom of the screen, never old scrollback
+    foot = "\n".join(text.rstrip().split("\n")[-4:])
+    if not (TRUST_RE.search(text) and TRUST_FOOT_RE.search(foot)):
+        return None
+    m = m if m is not None else parse_menu(text)
+    return m if m and not m.get("multi") and any(TRUST_OPT_RE.match(o["label"]) for o in m["options"]) else None
+
+
 def trust_dialog(host, a, fresh=False):
     """The trust dialog's menu when this idle Claude is showing it, else None."""
     if host.get("kind") == "tmux" or a.get("agent") != "claude" or a.get("agent_status") not in ("idle", "unknown", "done"):
@@ -495,14 +505,8 @@ def trust_dialog(host, a, fresh=False):
     hit = TRUST_CACHE.get(key)
     if hit and not fresh and now - hit[0] < TRUST_TTL_S:
         return hit[1]
-    menu = None
     try:
-        text = "\n".join(read_tail(host, a["pane_id"], 40).split("\n")[-22:])   # the dialog is the whole bottom of the screen, never old scrollback
-        foot = "\n".join(text.rstrip().split("\n")[-4:])
-        if TRUST_RE.search(text) and TRUST_FOOT_RE.search(foot):
-            m = parse_menu(text)
-            if m and not m.get("multi") and any(TRUST_OPT_RE.match(o["label"]) for o in m["options"]):
-                menu = m
+        menu = trust_menu_in(read_tail(host, a["pane_id"], 40))
     except HerdrError:
         menu = None
     TRUST_CACHE[key] = (now, menu)
@@ -1005,10 +1009,17 @@ def _poll_host(host):
         if a.get("_ask"):
             continue
         try:   # what is it waiting on? the question on screen, or "nothing", which is itself worth knowing
-            m = parse_menu(read_tail(host, a["pane_id"], 40))
+            scr = read_tail(host, a["pane_id"], 40)
+            m = parse_menu(scr)
             a["_ask"] = {"q": (m or {}).get("question"), "n": len((m or {}).get("options") or []), "menu": bool(m)}
         except Exception:
             a["_ask"] = None
+            continue
+        # A herdr that DOES call the trust prompt blocked: the same auto-yes, from this one read (no second read of the pane)
+        tm = a.get("agent") == "claude" and host.get("kind") != "tmux" and m and trust_menu_in(scr, m)
+        if tm:
+            a["_trust"] = True
+            auto_trust(host, a, tm, os.path.basename((a.get("cwd") or a.get("foreground_cwd") or "").rstrip("/")) or a["pane_id"])
     try:
         wlist = run_herdr(host["machine"], ["workspace", "list"], timeout=9)["result"]["workspaces"]
         ws = {w["workspace_id"]: w.get("label") for w in wlist}
@@ -1177,7 +1188,51 @@ def build_queue():
 # --------------------------------------------------------------------------------------------
 # reading a dialog, and planning a send
 # --------------------------------------------------------------------------------------------
+BARE_OPT_RE = re.compile(r"^(\s*)(❯\s+)?(\S.*?)\s*$")
+
+
+def parse_bare_trust_menu(text):
+    """Claude Code's folder-trust dialog draws its two options WITHOUT numbers ("❯ No, exit" / "  Yes, I trust this folder";
+    seen on Fred's screen 2026-11-21, which v52 missed because parse_menu only reads numbered rows). Read only when the screen is that
+    dialog (its wording AND its key hint at the bottom), so an idle Claude's empty "❯" input line can never pass for a menu. The rows
+    are the cursor row plus the unbroken lines beside it whose text starts in the same column; each gets a number 1..k for the phone."""
+    lines = text.split("\n")
+    tail = "\n".join(lines[-22:])
+    if not (TRUST_RE.search(tail) and TRUST_FOOT_RE.search(text.rstrip().split("\n")[-1])):   # the key hint is the LAST line: a live dialog
+        return None
+    cur = next((i for i in range(len(lines) - 1, max(-1, len(lines) - 22), -1)
+                if (m := BARE_OPT_RE.match(lines[i])) and m.group(2)), None)
+    if cur is None:
+        return None
+    col = lambda m: len(m.group(1)) + len(m.group(2) or "")
+    c0 = col(BARE_OPT_RE.match(lines[cur]))
+    def row(i):
+        m = lines[i].strip() and BARE_OPT_RE.match(lines[i])
+        return m if m and col(m) == c0 and not OPT_RE.match(lines[i]) and (i == cur or not m.group(2)) else None
+    lo = cur
+    while lo - 1 >= 0 and row(lo - 1):
+        lo -= 1
+    hi = cur
+    while hi + 1 < len(lines) and row(hi + 1):
+        hi += 1
+    rows = list(range(lo, hi + 1))
+    if not 2 <= len(rows) <= 6:
+        return None
+    opts = []
+    for k, i in enumerate(rows):
+        label = BARE_OPT_RE.match(lines[i]).group(3)[:200]
+        opts.append({"n": k + 1, "label": label, "approves": bool(APPROVE_RE.match(label)), "checked": None, "free": False, "idx": k})
+    q = next((l.strip() for l in lines[-22:] if TRUST_RE.search(l)), None)
+    return {"current": cur - lo + 1, "cur_idx": cur - lo, "options": opts, "multi": False, "question": (q or "")[:200] or None,
+            "form": False, "bare": True}
+
+
 def parse_menu(text):
+    m = _parse_numbered_menu(text)
+    return m if m else parse_bare_trust_menu(text)
+
+
+def _parse_numbered_menu(text):
     """Find the live menu at the bottom of a pane, e.g. Claude Code's AskUserQuestion or a permission dialog.
     Single choice: {"current": n, "options": [{"n","label","approves"}]}.
     Multi-select adds "multi": True, a "checked" flag on each toggle, and "action": the Submit / Next row. In that

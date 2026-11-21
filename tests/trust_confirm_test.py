@@ -14,7 +14,7 @@ def check(name, cond):
     global ok
     print(("PASS " if cond else "FAIL ") + name); ok = ok and bool(cond)
 
-TRUST = "\n".join(["", " Quick safety check: Is this a project you created or one you trust?", "", " /home/pi/nas/Projects/newthing", "",
+TRUST = "\n".join(["", " Quick safety check: Is this a project you created or one you trust?", "", " /srv/work/newthing", "",
                    " Claude Code'll be able to read, edit, and execute files here.", "",
                    " ❯ 1. Yes, I trust this folder", "   2. No, exit", "", " Enter to confirm · Esc to cancel"])
 TRUST_OLD = TRUST.replace("Quick safety check: Is this a project you created or one you trust?", "Do you trust the files in this folder?")
@@ -23,7 +23,7 @@ HOOK = ("Hook PreToolUse:Bash requires confirmation for this command:\n[PAI SECU
         " Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend\n")
 
 screen = {"t": TRUST}
-host = {"id": "gus", "machine": "m", "kind": "local", "enabled": True}
+host = {"id": "h1", "machine": "m", "kind": "local", "enabled": True}
 pressed = []
 srv.read_tail = lambda h, pane, n, **k: screen["t"]
 def fake_run(machine, args, **k):
@@ -31,7 +31,7 @@ def fake_run(machine, args, **k):
 srv.run_herdr = fake_run
 srv.log_event = lambda *a, **k: None
 def idle(agent="claude", status="idle", seq=5):
-    return {"pane_id": "w1:p1", "agent": agent, "agent_status": status, "state_change_seq": seq, "cwd": "/home/pi/nas/Projects/newthing"}
+    return {"pane_id": "w1:p1", "agent": agent, "agent_status": status, "state_change_seq": seq, "cwd": "/srv/work/newthing"}
 def reset():
     srv.TRUST_CACHE.clear(); srv.TRUST_SENT.clear(); pressed.clear()
 
@@ -90,7 +90,7 @@ sent = []
 srv.run_step = lambda h, pane, step: sent.append(dict(step))
 def commit(before, after, body, **after_state):
     sent.clear(); srv.LAST_SENT.clear(); state.update(seq=7, status="blocked", sess="s1"); screen["t"] = before
-    p = srv.build_plan(dict(body, host="gus", pane="w1:p1"))
+    p = srv.build_plan(dict(body, host="h1", pane="w1:p1"))
     screen["t"] = after; state.update(after_state)
     try: srv.commit_plan(p["nonce"]); return None
     except srv.HerdrError as e: return e.code
@@ -111,5 +111,50 @@ r = commit(Q, Q, {"kind": "choose", "option": 1})
 check("unchanged counter: sent as before", r is None and sent == [{"op": "keys", "keys": ["enter"]}])
 r = commit("ready\n> ", "ready\n> ", {"kind": "text", "text": "hi"}, seq=9, status="idle")
 check("a message to an idle agent whose counter moved is still refused", r == "moved_on" and sent == [])
+
+
+# ---- 2026-11-21, the screen Fred actually got: Claude Code draws the trust options WITHOUT numbers, "No, exit" first, cursor on it.
+# v52 only read numbered menus, so this was never seen and nothing was pressed.
+BARE = "\n".join(["─" * 60, " Accessing workspace:", "", " /srv/work/app", "",
+                  " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source",
+                  " project, or work from your team). If not, take a moment to review what's in this folder first.", "",
+                  " Claude Code'll be able to read, edit, and execute files here.", "", " Security guide", "",
+                  " ❯ No, exit", "   Yes, I trust this folder", "", " Enter to confirm · Esc to cancel"])
+m = srv.parse_menu(BARE)
+check("bare trust: Fred's real unnumbered dialog parses as a 2-option menu", bool(m) and [o["label"] for o in m["options"]] == ["No, exit", "Yes, I trust this folder"] and m["cur_idx"] == 0)
+check("bare trust: 'Security guide' is not taken for an option", m and all("Security" not in o["label"] for o in m["options"]))
+reset(); screen["t"] = BARE; a = idle(); mm = srv.apply_trust(host, a)
+check("bare trust: shown as blocked with its menu", bool(mm) and a["agent_status"] == "blocked" and a["_ask"]["n"] == 2)
+srv.auto_trust(host, a, mm, "herder.remote.iphone")
+check("bare trust auto: cursor on 'No, exit' -> DOWN then Enter (onto 'Yes, I trust this folder')", pressed == [["pane", "send-keys", "w1:p1", "down", "enter"]])
+reset(); screen["t"] = BARE.replace(" ❯ No, exit", "   No, exit").replace("   Yes, I trust this folder", " ❯ Yes, I trust this folder")
+a = idle(); mm = srv.apply_trust(host, a); srv.auto_trust(host, a, mm, "x")
+check("bare trust auto: cursor already on Yes -> Enter only", pressed == [["pane", "send-keys", "w1:p1", "enter"]])
+# A herdr that calls the trust prompt BLOCKED: the poller's one read of a blocked pane does the auto-yes (no second read: S7 in fixes_v49)
+def poll_once(status, txt, agent="claude"):
+    reset(); screen["t"] = txt; reads = []; saved = (srv.run_herdr, srv.read_tail, srv.note_seen, srv.watch_local)
+    def fr(machine, args, **k):
+        if args[:2] == ["agent", "list"]: return {"result": {"agents": [dict(idle(agent=agent, status=status))]}}
+        if args[:2] == ["workspace", "list"]: return {"result": {"workspaces": []}}
+        pressed.append(list(args)); return {}
+    srv.run_herdr = fr; srv.read_tail = lambda h, pane, n, **k: (reads.append(pane), screen["t"])[1]
+    srv.note_seen = lambda *a, **k: None; srv.watch_local = lambda *a, **k: None
+    try: srv._poll_host(dict(host))
+    finally: srv.run_herdr, srv.read_tail, srv.note_seen, srv.watch_local = saved
+    return reads
+r = poll_once("blocked", BARE)
+check("poller: a herdr that calls it blocked still gets the auto-yes (down, Enter)", pressed == [["pane", "send-keys", "w1:p1", "down", "enter"]])
+check("poller: ...from ONE read of that pane", r == ["w1:p1"])
+poll_once("blocked", HOOK); check("poller: a blocked HOOK confirmation is never pressed", pressed == [])
+poll_once("blocked", PERM); check("poller: a blocked permission dialog is never pressed", pressed == [])
+poll_once("blocked", BARE, agent="codex"); check("poller: only Claude's trust prompt", pressed == [])
+r = poll_once("idle", BARE)
+check("poller: the idle case (what herdr really says) presses it too", pressed == [["pane", "send-keys", "w1:p1", "down", "enter"]])
+check("bare: an idle Claude's empty-ish input line is never a menu", srv.parse_menu("done.\n\n─────\n ❯ fix the thing\n─────\n  ? for shortcuts") is None)
+check("bare: an unnumbered list WITHOUT the trust wording is never a menu",
+      srv.parse_menu(" Pick one\n ❯ Delete everything\n   Keep\n\n Enter to confirm · Esc to cancel") is None)
+check("bare: trust wording but no key hint at the bottom (old scrollback) is not a menu", srv.parse_menu(BARE + "\n\nlater output\n$ ") is None)
+r = commit(BARE, BARE, {"kind": "choose", "option": 2}, seq=9)
+check("bare trust tap: Fred taps 'Yes, I trust this folder' (2) -> down, Enter, even after the counter moved", r is None and sent == [{"op": "keys", "keys": ["down", "enter"]}])
 
 print("ALL OK" if ok else "SOMETHING FAILED"); sys.exit(0 if ok else 1)

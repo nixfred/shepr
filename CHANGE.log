@@ -1,6 +1,15 @@
 Shepr change log. Newest first.
 Every outside contribution is listed with the contributor's GitHub profile and, when one could be verified, their X profile.
 
+2026-11-21  server  v53: the trust prompt Claude Code really draws (no numbers) is seen and accepted
+  v52 never fired on a real screen: Claude Code draws the folder-trust options WITHOUT numbers ("❯ No, exit" / "Yes, I trust this folder",
+      No first, cursor on it), and the menu reader only knew numbered rows, so nothing showed and nothing was pressed. The reader now
+      also takes an unnumbered list, but only on that dialog (its wording, and its "Enter to confirm · Esc to cancel" hint as the last line),
+      so an idle Claude's "❯" input line can never pass for a menu. Shepr moves Down onto the trusting option, then Enter; a tap on
+      "Yes, I trust this folder" from the phone works the same way.
+  A herdr that calls the prompt blocked (not idle) gets the same auto-yes, from the one read the poller already makes of a blocked pane.
+  tests/trust_confirm_test.py (now 40 checks, built from the exact screen Fred got).
+
 2026-11-21  server  the folder-trust prompt shows on the phone and is accepted; a tap on a blocked dialog is no longer refused when only herdr's counter moved
   A Claude Code session that stops at "Do you trust this folder?" reads as idle to herdr, so it was not in the Queue and an answer was refused
       as "not blocked" (a typed "Yes" went nowhere). Shepr now reads the screen of an idle Claude: a trust dialog is shown as a blocked
