@@ -56,6 +56,12 @@ read its CLAUDE.md first). The directory name is Fred's session name; the produc
     the fleet-stop notice or the Lock Screen card. Do not give it a send path, and keep these names out of the public repo and its
     examples: the machines and sessions in use are in the owner's state folder, never here. `tests/tmux_test.py`, `tests/tmux_ui.mjs`.
 
+15. **The folder-trust prompt is the one answer Shepr gives alone (Fred, 2026-11-21: "you may always choose YES on Claude folder-trust prompts, it
+    only ever opens my own code").** An idle Claude whose screen is Claude Code's trust dialog (`trust_dialog`: the trust wording AND a trusting
+    option) is shown as blocked, and with `SHEPR_AUTOTRUST` on (the default; `0` turns it off, `SHEPR_READONLY` always does) Shepr presses that
+    option once per prompt (`auto_trust`, audited as `trust_auto`, never retried). Nothing else is auto-answered: a permission dialog or a
+    hook confirmation waits for a tap, however it is worded (rule 2 stands for them). `tests/trust_confirm_test.py`.
+
 ## Where things live
 
 `server.py` is the backend and the `shepr` CLI; `usage.py` is the subscription meter (first-party, standard library only). State is in `~/.local/state/shepr/`. herdr has no

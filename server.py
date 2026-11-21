@@ -471,6 +471,71 @@ def read_tail(host, pane, lines, max_bytes=TAIL_MAX_BYTES):
     return _tail_text(out, lines, max_bytes)
 
 
+# ---- Claude Code's folder-trust prompt ("Do you trust the files in this folder?"). herdr does not call it "blocked" (the session has not
+# started yet, so it reads as idle), which left it off the phone's Queue and refused by the server ("not_blocked"). So Shepr reads the
+# screen of an idle Claude, and a trust dialog makes it a blocked, answerable session like any other numbered question.
+# Fred, 2026-11-21: "you may always choose YES on Claude folder-trust prompts, it only ever opens my own code", so with SHEPR_AUTOTRUST
+# on (the default) Shepr itself presses the trust option, ONCE per prompt. It is the one answer Shepr gives alone, and only this one:
+# the screen must be the trust dialog and the option must be the one that says it trusts the folder; no other dialog is ever touched.
+TRUST_RE = re.compile(r"do you trust the (?:files|contents) in this (?:folder|directory)|is this a project you (?:created|trust)|trust this (?:folder|directory)", re.I)
+TRUST_OPT_RE = re.compile(r"^yes\b.*\btrust\b|^yes,?\s+proceed\b|^trust\b", re.I)
+TRUST_FOOT_RE = re.compile(r"enter to (?:confirm|continue)|esc to (?:cancel|exit)", re.I)   # the dialog ends with its key hint
+AUTOTRUST = os.environ.get("SHEPR_AUTOTRUST", "1") != "0" and not READONLY
+TRUST_TTL_S = 5.0
+TRUST_CACHE = {}   # (host, pane) -> (time, menu or None)
+TRUST_SENT = {}    # (host, pane) -> time Shepr pressed trust there; never pressed again for TRUST_RETRY_S (rule 3: a write is never retried)
+TRUST_RETRY_S = 600.0
+
+
+def trust_dialog(host, a, fresh=False):
+    """The trust dialog's menu when this idle Claude is showing it, else None."""
+    if host.get("kind") == "tmux" or a.get("agent") != "claude" or a.get("agent_status") not in ("idle", "unknown", "done"):
+        return None
+    key, now = (host["id"], a["pane_id"]), time.time()
+    hit = TRUST_CACHE.get(key)
+    if hit and not fresh and now - hit[0] < TRUST_TTL_S:
+        return hit[1]
+    menu = None
+    try:
+        text = "\n".join(read_tail(host, a["pane_id"], 40).split("\n")[-22:])   # the dialog is the whole bottom of the screen, never old scrollback
+        foot = "\n".join(text.rstrip().split("\n")[-4:])
+        if TRUST_RE.search(text) and TRUST_FOOT_RE.search(foot):
+            m = parse_menu(text)
+            if m and not m.get("multi") and any(TRUST_OPT_RE.match(o["label"]) for o in m["options"]):
+                menu = m
+    except HerdrError:
+        menu = None
+    TRUST_CACHE[key] = (now, menu)
+    return menu
+
+
+def apply_trust(host, a, fresh=False):
+    """Show a trust dialog as the blocked question it is. Returns the menu or None."""
+    m = trust_dialog(host, a, fresh)
+    if m:
+        a["agent_status"] = "blocked"
+        a["_trust"] = True
+        a["_ask"] = {"q": m.get("question"), "n": len(m["options"]), "menu": True}
+    return m
+
+
+def auto_trust(host, a, menu, label):
+    """Press the trust option, once. Only ever called with the menu trust_dialog found."""
+    if not AUTOTRUST:
+        return
+    key, now = (host["id"], a["pane_id"]), time.time()
+    if now - TRUST_SENT.get(key, 0) < TRUST_RETRY_S:
+        return
+    opt = next(o for o in menu["options"] if TRUST_OPT_RE.match(o["label"]))
+    keys = _nav(menu["cur_idx"], opt["idx"]) + ["enter"]
+    TRUST_SENT[key] = now   # recorded before the press: a failed press is reported, not retried
+    try:
+        run_herdr(host["machine"], ["pane", "send-keys", a["pane_id"]] + keys, timeout=10, want_json=False)
+        log_event("trust_auto", host["id"], a["pane_id"], label, what=f"trusted the folder ({opt['label'][:60]})")
+    except HerdrError as e:
+        log_event("trust_auto_failed", host["id"], a["pane_id"], label, why=f"{e.code}: {e.message}"[:160])
+
+
 def get_agent(host, pane):
     if isinstance(host["machine"], TmuxTarget):
         for a in tmux_panes(host["machine"])[0]:
@@ -478,7 +543,10 @@ def get_agent(host, pane):
                 return dict(a)
         raise HerdrError("no_pane", "that pane is not in a session Shepr may read")
     r = run_herdr(host["machine"], ["agent", "get", pane], timeout=8)
-    return r["result"]["agent"]
+    a = r["result"]["agent"]
+    if isinstance(a, dict) and isinstance(a.get("pane_id"), str):
+        apply_trust(host, a, fresh=True)
+    return a
 
 
 # --------------------------------------------------------------------------------------------
@@ -928,7 +996,14 @@ def _poll_host(host):
         return host, None, {}, "bad_response: herdr's agent list is not a list"
     agents = [a for a in agents if isinstance(a, dict) and isinstance(a.get("pane_id"), str)
               and isinstance(a.get("agent_status"), str)]
+    for a in agents:   # a folder-trust dialog reads as idle to herdr: see trust_dialog
+        if a["agent_status"] in ("idle", "unknown", "done"):
+            m = apply_trust(host, a)
+            if m:
+                auto_trust(host, a, m, os.path.basename((a.get("cwd") or a.get("foreground_cwd") or "").rstrip("/")) or a["pane_id"])
     for a in [x for x in agents if x["agent_status"] == "blocked"][:6]:
+        if a.get("_ask"):
+            continue
         try:   # what is it waiting on? the question on screen, or "nothing", which is itself worth knowing
             m = parse_menu(read_tail(host, a["pane_id"], 40))
             a["_ask"] = {"q": (m or {}).get("question"), "n": len((m or {}).get("options") or []), "menu": bool(m)}
@@ -1536,9 +1611,21 @@ def _commit_pane_plan(host, plan):
     a = get_agent(host, plan["pane"])
     snap = plan["snap"]
     key = (plan["host"], plan["pane"])
-    if (a["agent_status"], a.get("state_change_seq"), (a.get("agent_session") or {}).get("value")) != \
-            (snap["status"], snap["seq"], snap["session"]):
-        raise HerdrError("moved_on", "the agent changed state since you looked, so nothing was sent. Read it again.")
+    same_state = (a["agent_status"], a.get("state_change_seq"), (a.get("agent_session") or {}).get("value")) == \
+        (snap["status"], snap["seq"], snap["session"])
+    if not same_state:
+        # herdr bumps state_change_seq while the SAME dialog stays up (a hook confirmation redraws, a trust prompt settles), and a tap on
+        # it was then refused as "moved on" however many times Fred pressed it (2026-11-21, a hook confirmation that sat BLOCKED 13 min).
+        # For an answer to a blocked dialog the counter is not what keeps it safe: the screen is. So the counter alone may differ when the
+        # agent is still blocked, in the same session, and the dialog on screen is the very one the preview was made from (the checks
+        # below: the chosen option, its label, the cursor, the question; or the whole menu for keys). Any other change still refuses.
+        menu_now = parse_menu(read_tail(host, plan["pane"], 80)) if snap["status"] == "blocked" and plan["kind"] in ("choose", "keys") else None
+        same_dialog = bool(menu_now) and a["agent_status"] == "blocked" and \
+            (a.get("agent_session") or {}).get("value") == snap["session"] and \
+            ((plan["kind"] == "keys" and "menu_at" in snap and _menu_fp(menu_now) == snap["menu_at"]) or
+             (plan["kind"] == "choose" and "pick" in snap and "question" in snap and menu_now.get("question") == snap["question"]))
+        if not same_dialog:
+            raise HerdrError("moved_on", "the agent changed state since you looked, so nothing was sent. Read it again.")
     # A preview made BEFORE the last answer to this terminal is dead: its screen is gone. A preview made AFTER it is fine,
     # even though herdr's state counter has not moved (a multi-step dialog, such as ticks then Review then Submit, is ONE
     # blocked state, so the counter cannot be what tells the steps apart).
