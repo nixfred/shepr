@@ -1,6 +1,18 @@
 Shepr change log. Newest first.
 Every outside contribution is listed with the contributor's GitHub profile and, when one could be verified, their X profile.
 
+2026-11-23  app  v54: the top host bar shows only hosts that are answering, and you can take one off it
+  Fred: "I want to be able to remove host from the top of the screens showing ... I don't want to have them show that they're there, but not available."
+  The bar no longer draws a host that is down or switched off (no more greyed "down" / "off" chips); it comes back on the bar by itself on the
+      next paint once it answers. A filter left on a host that is not in the bar is cleared.
+  To hide a host yourself: tap its chip, then the x that appears on that chip. Tap, double-tap and hold keep their meanings. The hide is kept
+      on the phone (localStorage shepr.hiddenhosts) and survives a reload. It is a display choice only: nothing is sent to the host, the machine
+      is not turned off or removed from herdr, and confirm-first sending and pairing are untouched.
+  The Hosts tab still lists every machine, hidden, offline and switched off ones too, and the scan's not-yet-added peers. A hidden host is marked
+      "hidden from bar" and has a Show button; every other row has Hide. "All hosts" appears only with two or more shown hosts, and the bar
+      is not drawn when fewer than two remain. The "ONLY X IS SHOWN, N more need you" notice is unchanged.
+  tests/hostbar_ui.mjs (28 checks, own server on port 8747); tests/tmux_ui.mjs now expects the Hide button on a tmux row.
+
 2026-11-21  server  v53: the trust prompt Claude Code really draws (no numbers) is seen and accepted
   v52 never fired on a real screen: Claude Code draws the folder-trust options WITHOUT numbers ("❯ No, exit" / "Yes, I trust this folder",
       No first, cursor on it), and the menu reader only knew numbered rows, so nothing showed and nothing was pressed. The reader now

@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v53';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v54';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -35,6 +35,13 @@ function el(tag, cls, text) {
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private mode: fine */ } },
+};
+// Hosts Fred took off the top bar (v54). A pure display filter kept on this phone: it never disables or removes the machine, never touches
+// herdr, sends or pairing, and the Hosts tab still lists it (marked hidden, with a Show button).
+const hiddenHosts = {
+  all() { const a = store.get('shepr.hiddenhosts', []); return Array.isArray(a) ? a.filter((x) => typeof x === 'string') : []; },
+  has(id) { return this.all().includes(id); },
+  set(id, hide) { const a = this.all().filter((x) => x !== id); if (hide) a.push(id); store.set('shepr.hiddenhosts', a); },
 };
 // Unsent text in a session's message box, kept per session so moving to another project and back finds it again. It lives
 // on this phone only (localStorage) and is never sent anywhere until you press Send.
@@ -517,9 +524,12 @@ function render() {
   if (S.cur) paintDetailChrome();
 }
 
+// The bar lists only machines that are answering right now and that Fred has not hidden: an offline or switched-off host is not shown
+// as "down" or "off" (the Hosts tab still lists every one of them), and it comes back by itself on the next paint once it answers.
 function paintHostbar() {
-  const hb = $('hostbar'), hosts = S.q.hosts;
-  hb.hidden = (hosts.length < 2 && hosts.every((h) => h.status === 'ok')) || (S.tab !== 'waiting' && S.tab !== 'all');
+  const hb = $('hostbar'), hid = hiddenHosts.all();
+  const hosts = S.q.hosts.filter((h) => h.status === 'ok' && !hid.includes(h.id));
+  hb.hidden = hosts.length < 2 || (S.tab !== 'waiting' && S.tab !== 'all');
   hb.textContent = '';
   if (S.host && !hosts.some((h) => h.id === S.host)) { S.host = null; store.set('shepr.host', null); }
   const setHostTo = (id) => { S.host = id; store.set('shepr.host', id); S.shown.clear(); render(); };
@@ -529,11 +539,10 @@ function paintHostbar() {
     hb.append(all);
   }
   hosts.forEach((h) => {
-    const c = el('button', 'chip' + (S.host === h.id ? ' on' : '') + (h.status !== 'ok' ? ' bad' : '')); c.style.setProperty('--hc', hostColor(h.id));
+    const c = el('button', 'chip' + (S.host === h.id ? ' on' : '')); c.style.setProperty('--hc', hostColor(h.id)); c.dataset.host = h.id;
     c.append(el('u'), h.id);
     const blocked = (h.counts && h.counts.blocked) || 0;
-    if (h.status !== 'ok') c.append(el('i', null, h.status === 'disabled' ? 'off' : 'down'));
-    else if (blocked) c.append(el('i', null, blocked));
+    if (blocked) c.append(el('i', null, blocked));
     const setHost = setHostTo;
     gesture(c, {
       instant: true,
@@ -541,6 +550,20 @@ function paintHostbar() {
       dbl: () => setHost(null),
       long: () => { S.tab = 'waiting'; store.set('shepr.tab', S.tab); setHost(h.id); },
     });
+    if (S.host === h.id) {
+      // Taking a host off the bar: pick its chip, then the x on it. (Tap, double-tap and hold keep their meanings.) The pointer events stop
+      // here so the chip underneath never sees them as a tap.
+      const x = el('s', 'hx', '\u00d7'); x.setAttribute('role', 'button'); x.setAttribute('aria-label', 'Remove ' + h.id + ' from this bar');
+      const eat = (e) => e.stopPropagation();
+      ['pointerdown', 'pointermove', 'pointercancel', 'click', 'contextmenu'].forEach((t) => x.addEventListener(t, eat));
+      x.addEventListener('pointerup', (e) => {
+        e.stopPropagation();
+        hiddenHosts.set(h.id, true); S.host = null; store.set('shepr.host', null); S.shown.clear();
+        notify(h.id + ' is off the top bar. The Hosts tab still lists it: tap Show there to bring it back.');
+        render();
+      });
+      c.append(x);
+    }
     hb.append(c);
   });
 }
@@ -1318,12 +1341,22 @@ function hostRow(h) {
   const r = el('div', 'hrow');
   const m = el('div', 'meta');
   const counts = Object.keys(h.counts || {}).map((k) => h.counts[k] + ' ' + k).join(', ');
-  m.append(el('div', 'ttl', h.id + (h.kind === 'local' ? ' · this machine' : h.kind === 'session' ? ' · a herdr session here' : h.kind === 'tmux' ? ' · tmux over ssh, read only' : '')),
+  const isHid = hiddenHosts.has(h.id);
+  m.append(el('div', 'ttl', h.id + (h.kind === 'local' ? ' · this machine' : h.kind === 'session' ? ' · a herdr session here' : h.kind === 'tmux' ? ' · tmux over ssh, read only' : '') + (isHid ? ' · hidden from bar' : '')),
            el('div', 'sub' + (h.status !== 'ok' && h.enabled ? ' bad' : ''), h.status === 'ok' ? (counts || 'no sessions') : !h.enabled ? 'saved, switched off'
              : ((h.error || 'not answering').slice(0, 90) + (h.last_ok ? '  \u00b7  last seen ' + agoText(h.last_ok) : '  \u00b7  not seen since Shepr started'))));
   r.append(m);
   const st = h.kind === 'local' ? 'ok' : !h.enabled ? 'off' : h.status === 'ok' ? 'ok' : 'bad';
   r.append(el('span', 'pill ' + (st === 'ok' ? 'ok' : st === 'bad' ? 'bad' : ''), st === 'ok' ? 'on' : st === 'off' ? 'off' : 'down'));
+  r.dataset.host = h.id; r.classList.toggle('hidden-host', isHid);
+  // A display choice on this phone only (never a herdr or host change), so it needs no confirm and works with a read-only host too.
+  const hb = btn(isHid ? 'Show' : 'Hide', 'mini-btn hidebtn' + (isHid ? '' : ' dim'), () => {
+    hiddenHosts.set(h.id, !isHid);
+    notify(isHid ? h.id + ' is back on the top bar when it is answering.' : h.id + ' is off the top bar. Show brings it back.');
+    paintMain(); paintHostbar();
+  });
+  hb.setAttribute('aria-label', (isHid ? 'Show ' : 'Hide ') + h.id + ' on the top bar'); hb.title = isHid ? 'Show on the top bar' : 'Hide from the top bar';
+  r.append(hb);
   if (h.kind === 'remote' && S.hosts && S.hosts.writes) {
     r.append(btn(h.enabled ? 'Turn off' : 'Turn on', 'mini-btn' + (h.enabled ? ' warn' : ''),
       () => prepare({ kind: h.enabled ? 'host_disable' : 'host_enable', id: h.id })));

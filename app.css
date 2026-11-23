@@ -87,6 +87,10 @@ button{font:inherit;color:inherit}
 .chip.bad{border-color:#5c2a36;color:var(--hot)}
 .chip i{font-style:normal;color:var(--warn)}
 .chip:active,.chip.pressing{background:#14202f}
+.chip s{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;margin:0 -6px 0 0;border-radius:13px;text-decoration:none;color:var(--dim);font-size:19px;line-height:1}
+.chip s:active{background:#2a1c24;color:var(--hot)}
+.mini-btn.dim{border-color:var(--line);color:var(--dim)}
+.hrow.hidden-host .ttl{color:var(--dim)}
 
 /* WHY: this is the only scrolling box on the main screen. -webkit-overflow-scrolling gives it
    native momentum; without it, scrolling inside a fixed layout feels dead on older iOS. */

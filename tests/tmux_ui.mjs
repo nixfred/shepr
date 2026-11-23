@@ -76,9 +76,9 @@ await page.screenshot({ path: path.join(os.tmpdir(), 'shepr-tmux-pane.png') });
 const lbl = await page.evaluate(async () => {
   const S = window.shepr; const h = await (await fetch('api/hosts', { headers: await S.signHeaders('GET', 'api/hosts', '') })).json();
   const t = h.saved.find((x) => x.id === 'lab'); const r = S.hostRow(t);
-  return { text: r.textContent, buttons: r.querySelectorAll('button').length, kind: t.kind, sessions: t.sessions };
+  return { text: r.textContent, buttons: r.querySelectorAll('button').length, labels: [...r.querySelectorAll('button')].map((x) => x.textContent), kind: t.kind, sessions: t.sessions };
 });
-check('the Hosts tab says tmux over ssh, read only, and has no Turn off button', /tmux over ssh, read only/.test(lbl.text) && lbl.buttons === 0 && lbl.kind === 'tmux' && lbl.sessions[0] === 'work');
+check('the Hosts tab says tmux over ssh, read only, and has no Turn off button (only the display-only Hide)', /tmux over ssh, read only/.test(lbl.text) && lbl.buttons === 1 && /^Hide$/.test(lbl.labels[0]) && lbl.kind === 'tmux' && lbl.sessions[0] === 'work');
 
 // a send forced past the screen is refused by the server, before any sheet
 const res = await page.evaluate(async () => {
