@@ -1,6 +1,15 @@
 Shepr change log. Newest first.
 Every outside contribution is listed with the contributor's GitHub profile and, when one could be verified, their X profile.
 
+2026-11-24  server+app  v55: the Subs tab shows Claude and Grok by default, and you choose which subscriptions to track
+  Fred: "Update the subscription tab to only show Claude and grok bot subscription info but allow a settings to allow the user to choose which ones they want to track."
+  Until a choice is made the tab shows Claude and Grok only. Choose in Settings > Subs (one row per subscription: Claude, Codex, Kimi, Grok, each
+      Tracked or Off) or with the Tracking buttons at the foot of the Subs tab. Turning all off says so and points at Settings.
+  The host keeps the choice (usage-tracked.json in the state folder, POST /api/usage/tracked, refused on a read-only server) so every phone and the
+      Lock Screen card agree. An untracked subscription is not just hidden: it is not measured at all, so Kimi's key is not used unless Kimi is on.
+  Also fixed: on the Subs tab a wide line or row of buttons could push the page past the right edge of the screen (the page shrank to its content).
+  tests/usage_test.py (13 new checks), tests/subtrack_ui.mjs (10 checks, own server on port 8748). Settings now has five pages; tests/ui.mjs lists them.
+
 2026-11-23  app  v54: the top host bar shows only hosts that are answering, and you can take one off it
   Fred: "I want to be able to remove host from the top of the screens showing ... I don't want to have them show that they're there, but not available."
   The bar no longer draws a host that is down or switched off (no more greyed "down" / "off" chips); it comes back on the bar by itself on the

@@ -888,3 +888,6 @@ html[data-motion=off] *,html[data-motion=off] *::before,html[data-motion=off] *:
 .dl{padding:0 8px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--txt)}
 .dl.add{background:rgba(124,255,0,.09);color:#c8ffa0} .dl.del{background:rgba(255,77,109,.10);color:#ffc2cd} .dl.hunk{color:var(--accent);margin-top:6px}
 .warnbox.risk{border-color:var(--hot);box-shadow:0 0 14px rgba(255,77,109,.28);font-weight:700}
+
+.trackfoot{margin-top:6px}.trackrow{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 2px}.trackrow .mini-btn.dim{opacity:.55}
+.subs{width:100%;box-sizing:border-box}   /* margin:auto shrinks a flex child to its content: a wide line or a row of buttons pushed the page past the screen */

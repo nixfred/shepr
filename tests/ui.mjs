@@ -1226,9 +1226,9 @@ const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', arg
     await page.fill('#msg', ''); await page.click('#dback'); await page.waitForTimeout(300);
   }
 
-  // ---- Settings: four sections that each fit one screen, the two links at the very bottom, and every choice does something
+  // ---- Settings: five sections that each fit one screen, the two links at the very bottom, and every choice does something
   {
-    const sections = ['display', 'alerts', 'phones', 'about'], fits = {};
+    const sections = ['display', 'alerts', 'subs', 'phones', 'about'], fits = {};
     for (const h of [844, 664]) {
       await page.setViewportSize({ width: 390, height: h }); await page.waitForTimeout(300);
       await tap(page, '.tab[data-view=settings]'); await page.waitForTimeout(600);

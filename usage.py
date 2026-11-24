@@ -43,6 +43,7 @@ GIFT_ID_SLACK_MS = 2 * 60_000
 
 # id, display name, seconds between probes
 PROVIDERS = (("claude", "Claude", 300), ("codex", "Codex", 60), ("kimi", "Kimi", 240), ("grok", "Grok", 300))
+DEFAULT_TRACKED = ("claude", "grok")   # what the Subscriptions tab shows until the owner chooses otherwise (Settings > Subscriptions to track)
 
 
 # ---------------------------------------------------------------------------------------------------------------- small parsers
@@ -579,6 +580,39 @@ class Meter:
         self.state = {pid: {"reading": None, "good": None, "next": 0} for pid, _n, _t in PROVIDERS}
         self.samples, self.win, self.dirty, self.ran, self.busy = {}, {}, False, False, False
         self._load()
+        self.tracked = self._load_tracked()
+
+    # ---- which providers the owner wants to see (and, with it, which are measured at all: an untracked one is never read, and Kimi's key never leaves)
+    def _tracked_path(self):
+        return os.path.join(self.dir, "usage-tracked.json")
+
+    def _load_tracked(self):
+        try:
+            ids = json.load(open(self._tracked_path()))
+            if isinstance(ids, list):
+                return [p for p, _n, _t in PROVIDERS if p in ids]   # known ids only, in the tab's own order
+        except (OSError, ValueError):
+            pass
+        return list(DEFAULT_TRACKED)
+
+    def set_tracked(self, ids):
+        """Save the owner's choice. Unknown ids are an error, not silently dropped. Returns the saved list."""
+        known = [p for p, _n, _t in PROVIDERS]
+        if not isinstance(ids, list) or any(not isinstance(i, str) or i not in known for i in ids):
+            raise ValueError("ids must be a list of: " + ", ".join(known))
+        keep = [p for p in known if p in ids]
+        os.makedirs(self.dir, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".usage-tracked.", suffix=".tmp")
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(keep, f)
+        os.replace(tmp, self._tracked_path())
+        with self.lock:
+            fresh = [p for p in keep if p not in self.tracked]
+            self.tracked = keep
+            for p in fresh:   # a provider just switched on is read on the next pass, not after its old wait
+                self.state[p]["next"] = 0
+        return keep
 
     def now_ms(self):
         return int(self.clock() * 1000)
@@ -652,7 +686,7 @@ class Meter:
         try:
             now = self.now_ms()
             for pid, _name, ttl in PROVIDERS:
-                if not force and now < self.state[pid]["next"]:
+                if pid not in self.tracked or (not force and now < self.state[pid]["next"]):
                     continue
                 r = self._probe(pid, now)
                 with self.lock:
@@ -721,12 +755,13 @@ class Meter:
     def view(self):
         now = self.now_ms()
         if not self.enabled:
-            return {"available": False, "measuring": False, "reason": "The subscription meter is switched off (SHEPR_USAGE=0).", "agents": [], "now": now}
+            return {"available": False, "measuring": False, "reason": "The subscription meter is switched off (SHEPR_USAGE=0).", "agents": [], "now": now,
+                    "providers": [{"id": p, "name": n, "tracked": False} for p, n, _t in PROVIDERS], "meter_off": True}
         with self.lock:
             agents = []
             for pid, name, _ttl in PROVIDERS:
                 rd = self.state[pid]["reading"]
-                if not rd:
+                if not rd or pid not in self.tracked:
                     continue
                 live = rd["measured_ms"] > 0 and now - rd["measured_ms"] <= LIVE_MS
                 rows, seen = [], set()
@@ -739,6 +774,9 @@ class Meter:
                 agents.append({"id": pid, "name": name, "rows": rows, "live": live, "measured_at": int(rd["measured_ms"]), "tier": text(rd["tier"], 24),
                                "status": text(rd["status"], 120), "help": text(rd["help"], 200)})
             measuring = not self.ran
-            reason = "" if agents else ("Reading your subscriptions…" if measuring else
-                                        "Shepr found no Claude Code, Codex, Grok or Kimi on this host, so there is nothing to meter.")
-            return {"available": bool(agents), "measuring": measuring and not agents, "reason": reason, "generated_at": now, "now": now, "agents": agents}
+            names = " or ".join(n for p, n, _t in PROVIDERS if p in self.tracked)
+            reason = "" if agents else ("No subscription is being tracked. Choose which ones in Settings." if not self.tracked else
+                                        "Reading your subscriptions…" if measuring else
+                                        "Shepr found no %s on this host, so there is nothing to meter." % names)
+            return {"available": bool(agents), "measuring": measuring and bool(self.tracked) and not agents, "reason": reason, "generated_at": now, "now": now,
+                    "agents": agents, "providers": [{"id": p, "name": n, "tracked": p in self.tracked} for p, n, _t in PROVIDERS]}

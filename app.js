@@ -8,7 +8,7 @@
      3. No timer, retry or "auto" anything ever sends. A failed send is reported, never repeated.
      4. The private key never leaves the phone: it is generated non-extractable and only signs. */
 'use strict';
-const BUILD = 'v54';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
+const BUILD = 'v55';   // keep equal to sw.js VERSION: shown in Settings and logged by the host, so you can see which app a phone is running
 
 // ---------------------------------------------------------------------------
 // 1. Service worker. Without this, a dead tailnet shows Safari's error page and
@@ -800,15 +800,43 @@ function subCard(ag, i, enter) {
   paint(true); BUD.ticks.push(() => paint(false));
   return card;
 }
+// Which subscriptions to track (Claude and Grok until chosen). The host saves it: an untracked plan is not shown and not even measured.
+// Shown at the foot of the Subs tab and in Settings > Display, the same buttons both places.
+async function toggleTracked(id) {
+  const d = BUD.data; if (!d || !d.providers || BUD.saving) return;
+  const ids = d.providers.filter((p) => (p.id === id ? !p.tracked : p.tracked)).map((p) => p.id);
+  BUD.saving = true;
+  try { BUD.data = await post('api/usage/tracked', { ids }); BUD.at = Date.now(); BUD.err = ''; }
+  catch (e) { notify('Could not save: ' + (e && e.message || 'failed'), true); }
+  finally { BUD.saving = false; }
+  render();
+}
+function trackChips() {
+  const row = el('div', 'trackrow');
+  const d = BUD.data;
+  if (!d || !d.providers) { row.append(el('span', 'sub', BUD.err ? 'Unavailable: ' + BUD.err : 'Reading\u2026')); return row; }
+  if (d.meter_off) { row.append(el('span', 'sub', 'The meter is switched off on this host.')); return row; }
+  d.providers.forEach((p) => {
+    const b = btn(p.name, 'mini-btn' + (p.tracked ? ' on' : ' dim'), () => toggleTracked(p.id));
+    b.dataset.provider = p.id; b.setAttribute('aria-pressed', String(!!p.tracked)); row.append(b);
+  });
+  return row;
+}
+function trackFoot() {
+  const f = el('div', 'trackfoot');
+  f.append(el('div', 'sec', 'Tracking'), trackChips());
+  return f;
+}
 function paintBudget() {
   const host = $('budget'); if (!host) return;
   BUD.ticks = []; host.textContent = '';
   const d = BUD.data, enter = host.classList.contains('enter');
   if (!d) { host.append(el('div', 'bd-empty', BUD.err ? 'Subscription budget unavailable: ' + BUD.err : 'Reading your subscriptions…')); return; }
-  if (!d.available) { host.append(el('div', 'bd-empty', d.reason || 'No subscription data on this host.')); host.append(whoStrip()); return; }
+  if (!d.available) { host.append(el('div', 'bd-empty', d.reason || 'No subscription data on this host.')); host.append(whoStrip(), trackFoot()); return; }
   host.append(subGuide(d));
   d.agents.forEach((ag, i) => host.append(subCard(ag, i + 1, enter)));
   if (!d.agents.some((a) => a.id === 'claude')) host.append(whoStrip());   // no Claude plan card to carry the chip: a strip instead
+  host.append(trackFoot());
 }
 async function fetchBudget(force) {
   if (BUD.busy || !S.dev || (!force && Date.now() - BUD.at < (BUD.data && BUD.data.available ? 20000 : 3000))) return;
@@ -1416,7 +1444,7 @@ function startScan() {
 
 // ---- Settings: four sections behind a bar so each one fits a screen (Law 17: the page never scrolls). Display is a set of
 // choices kept on this phone; Alerts and Phones are the host's lists; About holds the build, and the two links sit at the bottom.
-const SET_SEGS = [['display', 'Display'], ['alerts', 'Alerts'], ['phones', 'Phones'], ['about', 'About']];
+const SET_SEGS = [['display', 'Display'], ['alerts', 'Alerts'], ['subs', 'Subs'], ['phones', 'Phones'], ['about', 'About']];
 let setSeg = store.get('shepr.setseg', 'display');
 const REFRESH_NOTE = { fast: 'queue every 5 s, an open session every 3 s', normal: 'queue every 10 s, an open session every 6 s', slow: 'queue every 30 s, an open session every 15 s',
                        manual: 'only when you pull down, tap refresh, or come back to the app' };
@@ -1456,6 +1484,21 @@ function setDisplay(b) {
     setRow('Slash commands', null, setChoice('slash', () => paintSlash())),
     setRow('Top spacing', 'The phone reports ' + reportedInset() + 'px at the top', setStep((d) => { topx = Math.max(0, Math.min(80, topx + d * 4)); applyTopx(true); }, () => topx + 'px')),
   );
+}
+// Settings > Subs: which subscriptions the Subs tab tracks. One row each, all on this one page. The host keeps the choice and an untracked
+// plan is not even measured (so Kimi's key is not used unless Kimi is on).
+const SUB_NOTE = { claude: 'Claude Code plan: the 5-hour and weekly windows', codex: 'Codex plan limits, read from its own session files',
+                   kimi: 'Needs a KIMI_API_KEY on the host', grok: 'Grok credit usage, read from its own log' };
+function setSubs(b) {
+  if (!BUD.data) fetchBudget(false).then(() => { if (S.tab === 'settings') render(); });   // the rows need the host's list of subscriptions
+  const d = BUD.data;
+  if (!d || !d.providers) { b.append(el('div', 'bd-empty', BUD.err ? 'Unavailable: ' + BUD.err : 'Reading\u2026')); return; }
+  if (d.meter_off) { b.append(el('div', 'bd-empty', 'The subscription meter is switched off on this host (SHEPR_USAGE=0).')); return; }
+  d.providers.forEach((p) => {
+    const bt = btn(p.tracked ? 'Tracked' : 'Off', 'mini-btn' + (p.tracked ? ' on' : ' dim'), () => toggleTracked(p.id));
+    bt.dataset.provider = p.id; bt.setAttribute('aria-pressed', String(!!p.tracked));
+    b.append(setRow(p.name, SUB_NOTE[p.id] || null, bt));
+  });
 }
 function setPhones(b) {
   const H = S.hosts, q = S.q;
@@ -1511,7 +1554,7 @@ function paintSettingsView(m) {
   const bar = el('div', 'setseg'); bar.id = 'setseg';
   SET_SEGS.forEach(([id, text]) => { const bt = btn(text, 'mini-btn' + (id === seg ? ' on' : ''), () => { setSeg = id; store.set('shepr.setseg', id); paintMain(); }); bt.dataset.seg = id; bar.append(bt); });
   const body = el('div', 'setbody'); body.id = 'setbody';
-  ({ display: setDisplay, alerts: (x) => x.append(notifyCard()), phones: setPhones, about: setAbout })[seg](body);
+  ({ display: setDisplay, alerts: (x) => x.append(notifyCard()), subs: setSubs, phones: setPhones, about: setAbout })[seg](body);
   m.append(bar, body, settingsFoot());
 }
 
@@ -2923,4 +2966,4 @@ async function boot() {
   hideSplash(false);
 }
 boot();
-window.shepr = { openBurn, ACT, BURN, isQuiet, fmtTok, awayWords, checkAway, noteLook, openActivity, openChanges, burnCard, fetchBurn, loadActivity, safeRender, S, ping, fetchQueue, standalone, signHeaders, renderBlocks, appIsStale, BUILD, liveCut, syncHistory, prepareUpload, loadLedger, fmtDur, paceLive, budgetVerdict, drafts, prefs, PREFS, currentModel, seenStore, isSeen, finished, finishedSeen, paintMain, paintHostbar, budgetGuidance, hostRow, paintTailAge, subCard };
+window.shepr = { openBurn, ACT, BURN, isQuiet, fmtTok, awayWords, checkAway, noteLook, openActivity, openChanges, burnCard, fetchBurn, loadActivity, safeRender, S, ping, fetchQueue, standalone, signHeaders, renderBlocks, appIsStale, BUILD, liveCut, syncHistory, prepareUpload, loadLedger, fmtDur, paceLive, budgetVerdict, drafts, prefs, PREFS, currentModel, seenStore, isSeen, finished, finishedSeen, paintMain, paintHostbar, budgetGuidance, hostRow, paintTailAge, subCard, switchTab, api };

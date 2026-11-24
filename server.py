@@ -4424,6 +4424,15 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json_out(200, {"ok": bool(res) and all(r["code"] == 200 for r in res), "results": res})
             if not post and u.path == "/api/budget":
                 return self.json_out(200, budget_view())
+            if post and u.path == "/api/usage/tracked":   # which subscriptions the Subs tab shows and Shepr measures
+                if READONLY:
+                    raise HerdrError("read_only", "read-only server")
+                try:
+                    METER.set_tracked(body.get("ids"))
+                except ValueError as e:
+                    raise HerdrError("bad_request", str(e))
+                threading.Thread(target=lambda: METER.refresh(), daemon=True).start()
+                return self.json_out(200, budget_view())
             if not post and u.path == "/api/activity":
                 return self.json_out(200, activity_view(q.get("since"), int(q.get("limit", ACTIVITY_MAX))))
             if not post and u.path == "/api/burn":

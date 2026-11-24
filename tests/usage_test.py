@@ -194,6 +194,8 @@ h = codex_home({"2026/10/10/rollout-a.jsonl": ([tc("2026-10-10T10:35:47.282Z", 1
 gh = grok_home([gl("2026-10-10T04:21:58.499Z", 2.0)])
 f = Fake(routes={"kimi": KIMI})
 m, sd = meter(clock, f, codex=h, grok=gh, env={"KIMI_API_KEY": "kimi-key-1"})
+check("tracked: with no choice made, only Claude and Grok are tracked", m.tracked == ["claude", "grok"])
+m.set_tracked(["claude", "codex", "kimi", "grok"])   # this scenario measures all four; the default is tested below
 v0 = m.view()
 check("meter: before the first reading there is nothing and it says it is measuring (the page never waits on the network)", v0["available"] is False and v0["measuring"] is True and f.calls == [])
 m.refresh(); v = m.view()
@@ -251,6 +253,26 @@ class Boom(Fake):
     def __call__(self, *a, **k): raise RuntimeError("provider exploded")
 m, sd = meter([NOW], Boom()); m.refresh()
 check("a provider that raises never takes the meter down: its card says it is unavailable", m.view()["agents"][0]["rows"] == [] and "unavailable" in m.view()["agents"][0]["status"])
+
+# ---- which subscriptions are tracked (Settings > Subscriptions to track)
+clock = [NOW]; h2 = codex_home({"2026/10/10/rollout-a.jsonl": ([tc("2026-10-10T10:35:47.282Z", 17.0, RESET)], 2000)}); gh2 = grok_home([gl("2026-10-10T04:21:58.499Z", 2.0)])
+f = Fake(routes={"kimi": KIMI}); m, sd = meter(clock, f, codex=h2, grok=gh2, env={"KIMI_API_KEY": "kimi-key-1"}); m.refresh(); v = m.view()
+check("tracked: by default the tab shows Claude and Grok only, though Codex and Kimi are installed", [a["id"] for a in v["agents"]] == ["claude", "grok"])
+check("tracked: an untracked provider is never measured: no request to Kimi, so its key goes nowhere", not any("kimi" in str(c).lower() for c in f.calls) and m.state["kimi"]["reading"] is None and m.state["codex"]["reading"] is None)
+check("tracked: the view lists every provider with its switch, for the settings buttons", [(p["id"], p["tracked"]) for p in v["providers"]] == [("claude", True), ("codex", False), ("kimi", False), ("grok", True)])
+saved = m.set_tracked(["kimi", "claude"])
+check("tracked: a choice is saved in the tab's own order", saved == ["claude", "kimi"] and json.load(open(os.path.join(sd, "usage-tracked.json"))) == ["claude", "kimi"])
+check("tracked: a restart keeps the choice", usage.Meter(sd, claude_dir(), env={}, http_get=Fake(), clock=lambda: NOW / 1000.0, home=tmp()).tracked == ["claude", "kimi"])
+m.refresh(); v = m.view()
+check("tracked: a provider switched on is read at the next pass, and one switched off disappears at once", [a["id"] for a in v["agents"]] == ["claude", "kimi"] and any("kimi" in str(c).lower() for c in f.calls))
+for bad in (["nope"], "claude", [1], None, ["claude", "claude;rm"]):
+    try:
+        m.set_tracked(bad); worse = True
+    except ValueError:
+        worse = False
+    check("tracked: %r is refused, nothing saved" % (bad,), not worse and m.tracked == ["claude", "kimi"])
+m.set_tracked([]); v = m.view()
+check("tracked: none chosen says so and points at Settings (not 'nothing installed')", v["available"] is False and v["measuring"] is False and "Choose which ones in Settings" in v["reason"] and all(not p["tracked"] for p in v["providers"]))
 
 # the code never reads another app's files
 src = open(os.path.join(here, "..", "usage.py")).read()

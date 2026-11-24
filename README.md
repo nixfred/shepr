@@ -123,7 +123,7 @@ To remove it, run `omarchy plugin remove nixfred.shepr`. That deletes the plugin
 |---|---|
 | **Queue** | Everything, in the order that matters: **Needs you** (longest blocked first), **Finished**, **Working**, then **Sleeping** last (with a **Wake…** button). Sessions are named after your herdr workspace ("Shepr"), falling back to the project directory. Badge shows what needs you. | It refreshes itself every 10 s while the app is open and the moment you come back to it; pull down from the top of any list to refresh on demand.
 | **Radar** | Every session on every host as a radar, with the counts (waiting, finished, working, idle) and the longest wait above it (below). |
-| **Subs** | Your Claude, Codex, Kimi and Grok subscriptions on one animated page: how much of each plan is used, and whether you are banked, on pace or behind (below). |
+| **Subs** | Your Claude and Grok subscriptions (Codex and Kimi too, if you turn them on in Settings > Subs) on one animated page: how much of each plan is used, and whether you are banked, on pace or behind (below). |
 | **Hosts** | Hosts herdr can reach (turn saved ones on or off), tmux sessions on machines that have no herdr (read only), and a scan for more: your tailnet, and a LAN range if you name one. |
 | **Settings** | Four sections that each fit one screen. **Display**: text size, splash screen (Full, Short or Off), animations, which tab to open on, how often to refresh, slash commands, top spacing. **Alerts**: notifications. **Phones**: this phone's key, the phones the host trusts (revoke), pair another, forget this one. **About**: the build, gestures, reload, clear unsent drafts. Two links sit at the very bottom: nixfred.com and this repository. |
 
@@ -260,11 +260,13 @@ that session. With the iPhone's Reduce Motion on, the sweep and the pulses stand
 
 ### Subscriptions
 
-The **Subs** tab has one card per subscription (Claude, Codex, Kimi, Grok) and answers "how much have I burned, and am I on pace?". Each
+The **Subs** tab has one card per tracked subscription and answers "how much have I burned, and am I on pace?". Each
 card has the plan used so far, a burn-down graph (the dashed diagonal is an even spend; above it is over, and the dotted line is
 where your current rate lands at the reset) and a verdict: **BANKED 32%** when you have used less than the clock has,
 **BEHIND** when you are more than 5% past an even spend, **ON PACE**, or **SPENT**. Every window of the plan (the week, the 5-hour session, Fable weekly) is listed as a bar with a marker for the clock, and the
 countdown (how long the bank is, or when to come back if you stop now) ticks live. The page animates in once when you open it: the cards slide in, each curve draws itself, the bars fill and the numbers climb (Reduce Motion skips that). The numbers are measured by Shepr itself (`usage.py`), on the host, and need no other app:
+
+**Which ones are tracked.** Claude and Grok until you choose otherwise. Settings > Subs (or the Tracking buttons at the foot of the Subs tab) turns each of Claude, Codex, Kimi and Grok on or off. The host keeps the choice (`usage-tracked.json` in its state folder), so every phone agrees, and a subscription that is off is not measured at all: Kimi's key is not used unless Kimi is on.
 
 - **Claude**: Claude Code's own login file is read, and its token is sent to Anthropic's usage endpoint (a read-only GET over HTTPS) and nowhere else. It is never refreshed by Shepr, never logged and never sent to the phone.
 - **Codex**: its own session files, which record the plan limits on every turn.
